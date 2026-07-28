@@ -1,0 +1,8 @@
+#!/bin/sh
+
+case "$*" in
+	"-q get proxyos.main.default_node_id") exit 1 ;;
+	"-q get proxyos.main.default_policy") printf 'direct\n' ;;
+	*) exit 0 ;;
+esac
+

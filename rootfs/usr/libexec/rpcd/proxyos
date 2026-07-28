@@ -1,0 +1,65 @@
+#!/bin/sh
+
+CTL="/usr/libexec/proxyos/proxyosctl"
+
+case "$1" in
+	list)
+		cat <<'EOF'
+{
+  "status": {},
+  "devices": {},
+  "nodes": {},
+  "node_add": {"name":"", "outbound_json":""},
+  "node_delete": {"id":""},
+  "device_bind": {"mac":"", "ip":"", "name":"", "policy":"", "node_id":""},
+  "wifi_status": {},
+  "wifi_toggle": {"enabled":true},
+  "ports": {},
+  "ports_apply": {"assignments_json":""},
+  "ports_confirm": {},
+  "subscriptions": {},
+  "subscription_add": {"name":"", "url":""},
+  "subscription_update": {"id":""},
+  "generate": {},
+  "apply": {}
+}
+EOF
+		;;
+	call)
+		read -r input
+		case "$2" in
+			status|devices|nodes|ports|ports_confirm|subscriptions|generate|apply)
+				exec "$CTL" "$(printf '%s' "$2" | tr '_' '-')" '{}'
+				;;
+			wifi_status)
+				exec "$CTL" wifi-status '{}'
+				;;
+			node_add)
+				exec "$CTL" node-add "$input"
+				;;
+			node_delete)
+				exec "$CTL" node-delete "$input"
+				;;
+			device_bind)
+				exec "$CTL" device-bind "$input"
+				;;
+			wifi_toggle)
+				exec "$CTL" wifi-toggle "$input"
+				;;
+			ports_apply)
+				exec "$CTL" ports-apply "$input"
+				;;
+			subscription_add)
+				exec "$CTL" subscription-add "$input"
+				;;
+			subscription_update)
+				exec "$CTL" subscription-update "$input"
+				;;
+			*)
+				printf '{"ok":false,"error":"Unknown method"}\n'
+				exit 1
+				;;
+		esac
+		;;
+esac
+

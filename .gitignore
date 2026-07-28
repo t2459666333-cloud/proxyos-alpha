@@ -1,0 +1,8 @@
+.build/
+.tools-cache/
+.test-state/
+dist/
+edge-*/
+ui-*.png
+.sample-sing-box.json
+

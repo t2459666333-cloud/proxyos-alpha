@@ -1,0 +1,561 @@
+#!/bin/sh
+set -eu
+
+STATE_DIR="${PROXYOS_STATE_DIR:-/etc/proxyos}"
+NODES_FILE="${STATE_DIR}/nodes.json"
+DEVICES_FILE="${STATE_DIR}/devices.json"
+SUBSCRIPTIONS_FILE="${STATE_DIR}/subscriptions.json"
+TEMPLATE_FILE="${STATE_DIR}/config-template.json"
+ACTIVE_CONFIG="${STATE_DIR}/sing-box.json"
+LAST_GOOD_CONFIG="${STATE_DIR}/sing-box.last-good.json"
+PORT_ROLLBACK_FLAG="/tmp/proxyos-port-rollback.pending"
+PORT_ROLLBACK_CONFIG="/tmp/proxyos-network.rollback"
+
+json_error() {
+	printf '{"ok":false,"error":%s}\n' "$(printf '%s' "$1" | jq -Rs .)"
+	exit 1
+}
+
+json_ok() {
+	printf '{"ok":true%s}\n' "${1:+,$1}"
+}
+
+require_commands() {
+	for command_name in jq uci ubus; do
+		command -v "$command_name" >/dev/null 2>&1 || json_error "Missing command: ${command_name}"
+	done
+}
+
+ensure_state() {
+	mkdir -p "$STATE_DIR"
+	[ -s "$NODES_FILE" ] || printf '[]\n' > "$NODES_FILE"
+	[ -s "$DEVICES_FILE" ] || printf '[]\n' > "$DEVICES_FILE"
+	[ -s "$SUBSCRIPTIONS_FILE" ] || printf '[]\n' > "$SUBSCRIPTIONS_FILE"
+}
+
+physical_interfaces() {
+	for net_path in /sys/class/net/*; do
+		[ -e "$net_path" ] || continue
+		iface="${net_path##*/}"
+		case "$iface" in
+			lo|br-*|docker*|veth*|tun*|tap*|wg*|proxyos*) continue ;;
+		esac
+		[ "$(cat "${net_path}/type" 2>/dev/null || true)" = "1" ] || continue
+		[ -e "${net_path}/device" ] || continue
+		device_path="$(readlink -f "${net_path}/device" 2>/dev/null || printf '%s' "$iface")"
+		printf '%s|%s\n' "$device_path" "$iface"
+	done | sort | cut -d '|' -f 2
+}
+
+wifi_status() {
+	available=false
+	enabled=false
+	phy_name=""
+	driver=""
+	reason="No AP-capable wireless adapter detected"
+
+	for phy_path in /sys/class/ieee80211/*; do
+		[ -e "$phy_path" ] || continue
+		candidate="${phy_path##*/}"
+		if iw phy "$candidate" info 2>/dev/null | grep -qE '^[[:space:]]+\*[[:space:]]+AP([[:space:]]|$)'; then
+			available=true
+			phy_name="$candidate"
+			driver="$(basename "$(readlink -f "${phy_path}/device/driver" 2>/dev/null || true)")"
+			reason=""
+			break
+		fi
+	done
+
+	if [ "$available" = true ]; then
+		if ubus call network.wireless status 2>/dev/null | jq -e 'to_entries | any(.value.up == true)' >/dev/null 2>&1; then
+			enabled=true
+		fi
+	fi
+
+	jq -n \
+		--argjson available "$available" \
+		--argjson enabled "$enabled" \
+		--arg phy "$phy_name" \
+		--arg driver "$driver" \
+		--arg reason "$reason" \
+		'{available:$available,enabled:$enabled,phy:$phy,driver:$driver,reason:$reason}'
+}
+
+status() {
+	system_info="$(ubus call system info 2>/dev/null || printf '{}')"
+	board_info="$(ubus call system board 2>/dev/null || printf '{}')"
+	node_count="$(jq 'length' "$NODES_FILE")"
+	bound_count="$(jq '[.[] | select(.policy == "fixed_node")] | length' "$DEVICES_FILE")"
+	singbox_running=false
+	if ubus call service list '{"name":"proxyos"}' 2>/dev/null | jq -e '.. | objects | select(.running? == true)' >/dev/null 2>&1; then
+		singbox_running=true
+	fi
+
+	jq -n \
+		--argjson system "$system_info" \
+		--argjson board "$board_info" \
+		--argjson nodes "$node_count" \
+		--argjson bound "$bound_count" \
+		--argjson running "$singbox_running" \
+		'{
+			version:"0.1.0-alpha",
+			hostname:($board.hostname // "ProxyOS"),
+			model:($board.model // "x86-64"),
+			kernel:($board.kernel // ""),
+			uptime:($system.uptime // 0),
+			load:($system.load // [0,0,0]),
+			memory:($system.memory // {}),
+			node_count:$nodes,
+			bound_device_count:$bound,
+			singbox_running:$running
+		}'
+}
+
+devices() {
+	tmp_discovered="/tmp/proxyos-devices.$$.jsonl"
+	tmp_result="/tmp/proxyos-devices.$$.json"
+	: > "$tmp_discovered"
+
+	if [ -r /tmp/dhcp.leases ]; then
+		while read -r _expires mac ip hostname _clientid; do
+			[ -n "${mac:-}" ] && [ -n "${ip:-}" ] || continue
+			[ "${hostname:-*}" = "*" ] && hostname="Unknown device"
+			jq -nc \
+				--arg mac "$(printf '%s' "$mac" | tr '[:lower:]' '[:upper:]')" \
+				--arg ip "$ip" \
+				--arg name "$hostname" \
+				'{mac:$mac,ip:$ip,name:$name,online:true}' >> "$tmp_discovered"
+		done < /tmp/dhcp.leases
+	fi
+
+	ip neigh show 2>/dev/null | awk '/lladdr/ && $NF != "FAILED" { print $1, $(NF-1) }' |
+	while read -r ip mac; do
+		[ -n "${mac:-}" ] || continue
+		jq -nc \
+			--arg mac "$(printf '%s' "$mac" | tr '[:lower:]' '[:upper:]')" \
+			--arg ip "$ip" \
+			'{mac:$mac,ip:$ip,name:"Unknown device",online:true}' >> "$tmp_discovered"
+	done
+
+	if [ -s "$tmp_discovered" ]; then
+		jq -s 'unique_by(.mac)' "$tmp_discovered" > "$tmp_result"
+	else
+		printf '[]\n' > "$tmp_result"
+	fi
+
+	jq -n --slurpfile discovered "$tmp_result" --slurpfile saved "$DEVICES_FILE" '
+		($saved[0] // [] | map(. + {online:false})) as $configured |
+		reduce ($discovered[0] // [])[] as $live
+			($configured;
+				if any(.[]; .mac == $live.mac) then
+					map(if .mac == $live.mac then . * $live else . end)
+				else . + [$live + {policy:"system_default",node_id:""}]
+				end
+			) |
+		sort_by([(.online | not), .name])
+	'
+
+	rm -f "$tmp_discovered" "$tmp_result"
+}
+
+nodes() {
+	jq 'map({
+		id,
+		name,
+		protocol:(.outbound.type // "unknown"),
+		source_type,
+		source_id:(.source_id // ""),
+		server:(.outbound.server // ""),
+		server_port:(.outbound.server_port // 0),
+		enabled:(.enabled // true)
+	})' "$NODES_FILE"
+}
+
+node_add() {
+	input="$1"
+	name="$(printf '%s' "$input" | jq -r '.name // empty')"
+	outbound_json="$(printf '%s' "$input" | jq -r '.outbound_json // empty')"
+	[ -n "$name" ] || json_error "Node name is required"
+	printf '%s' "$outbound_json" | jq -e 'type == "object" and (.type | type == "string")' >/dev/null 2>&1 ||
+		json_error "outbound_json must be a valid sing-box outbound object"
+
+	outbound_type="$(printf '%s' "$outbound_json" | jq -r '.type')"
+	case "$outbound_type" in
+		direct|block|selector|urltest|"") json_error "This outbound type cannot be added as a proxy node" ;;
+	esac
+
+	canonical="$(printf '%s' "$outbound_json" | jq -Sc 'del(.tag)')"
+	node_id="$(printf 'manual|%s' "$canonical" | sha256sum | cut -c 1-16)"
+	node_json="$(jq -n \
+		--arg id "$node_id" \
+		--arg name "$name" \
+		--argjson outbound "$canonical" \
+		'{id:$id,name:$name,source_type:"manual",source_id:"",enabled:true,outbound:$outbound}')"
+
+	tmp_file="${NODES_FILE}.tmp"
+	jq --arg id "$node_id" --argjson node "$node_json" \
+		'map(select(.id != $id)) + [$node]' "$NODES_FILE" > "$tmp_file"
+	mv "$tmp_file" "$NODES_FILE"
+	generate_config >/dev/null
+	json_ok "\"id\":\"${node_id}\""
+}
+
+node_delete() {
+	input="$1"
+	node_id="$(printf '%s' "$input" | jq -r '.id // empty')"
+	[ -n "$node_id" ] || json_error "Node id is required"
+	tmp_file="${NODES_FILE}.tmp"
+	jq --arg id "$node_id" 'map(select(.id != $id))' "$NODES_FILE" > "$tmp_file"
+	mv "$tmp_file" "$NODES_FILE"
+	tmp_file="${DEVICES_FILE}.tmp"
+	jq --arg id "$node_id" \
+		'map(if .node_id == $id then .policy="block" | .node_id="" else . end)' \
+		"$DEVICES_FILE" > "$tmp_file"
+	mv "$tmp_file" "$DEVICES_FILE"
+	generate_config >/dev/null
+	json_ok
+}
+
+device_bind() {
+	input="$1"
+	mac="$(printf '%s' "$input" | jq -r '.mac // empty' | tr '[:lower:]' '[:upper:]')"
+	ip="$(printf '%s' "$input" | jq -r '.ip // empty')"
+	name="$(printf '%s' "$input" | jq -r '.name // "Unknown device"')"
+	policy="$(printf '%s' "$input" | jq -r '.policy // "system_default"')"
+	node_id="$(printf '%s' "$input" | jq -r '.node_id // ""')"
+
+	printf '%s' "$mac" | grep -Eq '^([0-9A-F]{2}:){5}[0-9A-F]{2}$' || json_error "Invalid MAC address"
+	printf '%s' "$ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || json_error "Invalid IPv4 address"
+	case "$policy" in
+		system_default|fixed_node|direct|block) ;;
+		*) json_error "Invalid device policy" ;;
+	esac
+	if [ "$policy" = "fixed_node" ]; then
+		jq -e --arg id "$node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
+			json_error "Selected node does not exist"
+	fi
+
+	device_json="$(jq -n \
+		--arg mac "$mac" --arg ip "$ip" --arg name "$name" \
+		--arg policy "$policy" --arg node_id "$node_id" \
+		'{mac:$mac,ip:$ip,name:$name,policy:$policy,node_id:$node_id}')"
+	tmp_file="${DEVICES_FILE}.tmp"
+	jq --arg mac "$mac" --argjson device "$device_json" \
+		'map(select(.mac != $mac)) + [$device]' "$DEVICES_FILE" > "$tmp_file"
+	mv "$tmp_file" "$DEVICES_FILE"
+
+	existing_section="$(uci show dhcp 2>/dev/null |
+		sed -n "s/^\(dhcp\.[^.]*\)\.mac='${mac}'$/\1/p" | head -n 1)"
+	if [ -z "$existing_section" ]; then
+		existing_section="dhcp.$(uci add dhcp host)"
+	fi
+	uci set "${existing_section}.name=${name}"
+	uci set "${existing_section}.mac=${mac}"
+	uci set "${existing_section}.ip=${ip}"
+	uci commit dhcp
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+
+	apply_generated_config
+	json_ok
+}
+
+generate_config() {
+	tmp_base="/tmp/proxyos-config-base.$$.json"
+	tmp_rules="/tmp/proxyos-config-rules.$$.json"
+	default_node="$(uci -q get proxyos.main.default_node_id || true)"
+	default_policy="$(uci -q get proxyos.main.default_policy || printf 'direct')"
+
+	jq -n --slurpfile template "$TEMPLATE_FILE" --slurpfile nodes "$NODES_FILE" '
+		($template[0]) as $base |
+		($nodes[0] // []) as $nodes |
+		$base |
+		.outbounds = (($nodes | map(.outbound + {tag:("node-" + .id)})) + [{type:"direct",tag:"direct"}]) |
+		.dns.servers = (
+			[
+				{
+					type:"https",
+					tag:"dns-direct",
+					server:"1.1.1.1",
+					path:"/dns-query",
+					tls:{enabled:true,server_name:"cloudflare-dns.com"}
+				}
+			] +
+			($nodes | map({
+				type:"https",
+				tag:("dns-node-" + .id),
+				server:"1.1.1.1",
+				path:"/dns-query",
+				tls:{enabled:true,server_name:"cloudflare-dns.com"},
+				detour:("node-" + .id)
+			}))
+		)
+	' > "$tmp_base"
+
+	jq -n --slurpfile devices "$DEVICES_FILE" --slurpfile nodes "$NODES_FILE" '
+		($nodes[0] // [] | map(.id)) as $node_ids |
+		{
+			block:[
+				($devices[0] // [])[] |
+				select(
+					(.ip // "") != "" and
+					(
+						.policy == "block" or
+						(.policy == "fixed_node" and (.node_id as $id | $node_ids | index($id)) == null)
+					)
+				) |
+				{source_ip_cidr:[(.ip + "/32")],action:"reject",method:"drop"}
+			],
+			route:[
+				($devices[0] // [])[] |
+			select((.ip // "") != "") |
+			({source_ip_cidr:[(.ip + "/32")]} +
+				if .policy == "direct" then
+					{action:"route",outbound:"direct"}
+				elif .policy == "fixed_node" and (.node_id as $id | $node_ids | index($id)) != null then
+					{action:"route",outbound:("node-" + .node_id)}
+				elif .policy == "fixed_node" then
+					empty
+				else empty end)
+			],
+			dns:[
+				($devices[0] // [])[] |
+				select((.ip // "") != "") |
+				if .policy == "fixed_node" and (.node_id as $id | $node_ids | index($id)) != null then
+					{source_ip_cidr:[(.ip + "/32")],action:"route",server:("dns-node-" + .node_id)}
+				elif .policy == "direct" or .policy == "system_default" then
+					{source_ip_cidr:[(.ip + "/32")],action:"route",server:"dns-direct"}
+				else empty end
+			]
+		}
+	' > "$tmp_rules"
+
+	final_outbound="direct"
+	if [ "$default_policy" = "fixed_node" ] &&
+		jq -e --arg id "$default_node" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null 2>&1; then
+		final_outbound="node-${default_node}"
+	fi
+
+	jq --slurpfile device_rules "$tmp_rules" --arg final "$final_outbound" '
+		.route.rules = (
+			[
+				{action:"sniff"}
+			] +
+			($device_rules[0].block // []) +
+			[
+				{protocol:"dns",action:"hijack-dns"},
+				{ip_is_private:true,action:"route",outbound:"direct"}
+			] +
+			($device_rules[0].route // [])
+		) |
+		.route.final = $final |
+		.dns.rules = ($device_rules[0].dns // [])
+	' "$tmp_base" > "${ACTIVE_CONFIG}.candidate"
+
+	rm -f "$tmp_base" "$tmp_rules"
+	printf '%s\n' "${ACTIVE_CONFIG}.candidate"
+}
+
+apply_generated_config() {
+	candidate="$(generate_config)"
+	if ! /usr/bin/sing-box check -c "$candidate" >/tmp/proxyos-singbox-check.log 2>&1; then
+		rm -f "$candidate"
+		json_error "sing-box rejected the generated configuration"
+	fi
+
+	[ ! -s "$ACTIVE_CONFIG" ] || cp "$ACTIVE_CONFIG" "$LAST_GOOD_CONFIG"
+	mv "$candidate" "$ACTIVE_CONFIG"
+	/etc/init.d/proxyos restart >/dev/null 2>&1 || {
+		if [ -s "$LAST_GOOD_CONFIG" ]; then
+			cp "$LAST_GOOD_CONFIG" "$ACTIVE_CONFIG"
+			/etc/init.d/proxyos restart >/dev/null 2>&1 || true
+		fi
+		json_error "Proxy restart failed; previous configuration was restored"
+	}
+}
+
+wifi_toggle() {
+	input="$1"
+	requested="$(printf '%s' "$input" | jq -r '.enabled // empty')"
+	current_status="$(wifi_status)"
+	printf '%s' "$current_status" | jq -e '.available == true' >/dev/null ||
+		json_error "Wi-Fi is unavailable because no AP-capable adapter was detected"
+	case "$requested" in
+		true) wifi up ;;
+		false) wifi down ;;
+		*) json_error "enabled must be true or false" ;;
+	esac
+	json_ok
+}
+
+ports() {
+	wan_device="$(uci -q get network.wan.device || true)"
+	lan_ports="$(uci -q show network.br_lan 2>/dev/null |
+		sed -n "s/^network\.br_lan\.ports='\(.*\)'$/\1/p")"
+	first=true
+	printf '['
+	for iface in $(physical_interfaces); do
+		[ "$first" = true ] || printf ','
+		first=false
+		mac="$(cat "/sys/class/net/${iface}/address" 2>/dev/null || true)"
+		state="$(cat "/sys/class/net/${iface}/operstate" 2>/dev/null || printf 'unknown')"
+		speed="$(cat "/sys/class/net/${iface}/speed" 2>/dev/null || printf '0')"
+		driver="$(basename "$(readlink -f "/sys/class/net/${iface}/device/driver" 2>/dev/null || true)")"
+		role="unused"
+		[ "$iface" = "$wan_device" ] && role="wan"
+		printf ' %s ' "$lan_ports" | grep -q " ${iface} " && role="lan"
+		jq -nc \
+			--arg name "$iface" --arg mac "$mac" --arg state "$state" \
+			--arg speed "$speed" --arg driver "$driver" --arg role "$role" \
+			'{name:$name,mac:$mac,state:$state,speed_mbps:($speed|tonumber? // 0),driver:$driver,role:$role}'
+	done
+	printf ']\n'
+}
+
+ports_apply() {
+	input="$1"
+	assignments="$(printf '%s' "$input" | jq -r '.assignments_json // empty')"
+	printf '%s' "$assignments" | jq -e 'type == "array"' >/dev/null 2>&1 ||
+		json_error "assignments_json must be an array"
+	[ "$(printf '%s' "$assignments" | jq '[.[] | select(.role == "wan")] | length')" = "1" ] ||
+		json_error "Exactly one WAN port is required"
+	[ "$(printf '%s' "$assignments" | jq '[.[] | select(.role == "lan")] | length')" -ge 1 ] ||
+		json_error "At least one LAN port is required"
+
+	for iface in $(printf '%s' "$assignments" | jq -r '.[].name'); do
+		case "$iface" in *[!A-Za-z0-9_.:-]*) json_error "Invalid interface name" ;; esac
+		[ -e "/sys/class/net/${iface}/device" ] || json_error "Interface ${iface} is not a physical port"
+	done
+
+	cp /etc/config/network "$PORT_ROLLBACK_CONFIG"
+	touch "$PORT_ROLLBACK_FLAG"
+	wan_iface="$(printf '%s' "$assignments" | jq -r '.[] | select(.role == "wan") | .name')"
+
+	uci -q batch <<-EOF
+		set network.wan='interface'
+		set network.wan.proto='dhcp'
+		set network.wan.device='${wan_iface}'
+		set network.br_lan='device'
+		set network.br_lan.name='br-lan'
+		set network.br_lan.type='bridge'
+		delete network.br_lan.ports
+		set network.lan='interface'
+		set network.lan.device='br-lan'
+		set network.lan.proto='static'
+		set network.lan.ipaddr='192.168.10.1'
+		set network.lan.netmask='255.255.255.0'
+	EOF
+	for iface in $(printf '%s' "$assignments" | jq -r '.[] | select(.role == "lan") | .name'); do
+		uci add_list "network.br_lan.ports=${iface}"
+	done
+	uci commit network
+
+	nohup sh -c '
+		sleep 90
+		if [ -f /tmp/proxyos-port-rollback.pending ]; then
+			cp /tmp/proxyos-network.rollback /etc/config/network
+			rm -f /tmp/proxyos-port-rollback.pending
+			/etc/init.d/network restart
+			logger -t proxyos "Port assignment rolled back because it was not confirmed"
+		fi
+	' >/dev/null 2>&1 &
+	/etc/init.d/network restart >/dev/null 2>&1 &
+	json_ok "\"confirmation_timeout\":90"
+}
+
+ports_confirm() {
+	rm -f "$PORT_ROLLBACK_FLAG" "$PORT_ROLLBACK_CONFIG"
+	json_ok
+}
+
+subscription_add() {
+	input="$1"
+	name="$(printf '%s' "$input" | jq -r '.name // empty')"
+	url="$(printf '%s' "$input" | jq -r '.url // empty')"
+	[ -n "$name" ] && [ -n "$url" ] || json_error "Subscription name and URL are required"
+	sub_id="$(printf '%s|%s' "$name" "$url" | sha256sum | cut -c 1-16)"
+	sub_json="$(jq -n --arg id "$sub_id" --arg name "$name" --arg url "$url" \
+		'{id:$id,name:$name,url:$url,format:"sing-box",last_update:0,status:"new"}')"
+	tmp_file="${SUBSCRIPTIONS_FILE}.tmp"
+	jq --arg id "$sub_id" --argjson sub "$sub_json" \
+		'map(select(.id != $id)) + [$sub]' "$SUBSCRIPTIONS_FILE" > "$tmp_file"
+	mv "$tmp_file" "$SUBSCRIPTIONS_FILE"
+	json_ok "\"id\":\"${sub_id}\""
+}
+
+subscriptions() {
+	jq 'map(del(.url) + {url_configured:(.url | length > 0)})' "$SUBSCRIPTIONS_FILE"
+}
+
+subscription_update() {
+	input="$1"
+	sub_id="$(printf '%s' "$input" | jq -r '.id // empty')"
+	url="$(jq -r --arg id "$sub_id" '.[] | select(.id == $id) | .url' "$SUBSCRIPTIONS_FILE")"
+	[ -n "$url" ] || json_error "Subscription not found"
+	download="/tmp/proxyos-subscription.$$.json"
+	curl --fail --location --connect-timeout 15 --max-time 60 "$url" -o "$download" ||
+		json_error "Subscription download failed"
+	jq -e '.outbounds | type == "array"' "$download" >/dev/null 2>&1 ||
+		json_error "Alpha 0.1 accepts sing-box JSON subscriptions only"
+
+	new_nodes="/tmp/proxyos-subscription-nodes.$$.json"
+	printf '[]\n' > "$new_nodes"
+	jq -c '.outbounds[] |
+		select(.type != "direct" and .type != "block" and .type != "selector" and .type != "urltest")' "$download" |
+	while read -r outbound; do
+		name="$(printf '%s' "$outbound" | jq -r '.tag // (.server + ":" + (.server_port|tostring))')"
+		canonical="$(printf '%s' "$outbound" | jq -Sc 'del(.tag)')"
+		node_id="$(printf '%s|%s' "$sub_id" "$canonical" | sha256sum | cut -c 1-16)"
+		node_json="$(jq -n --arg id "$node_id" --arg name "$name" --arg sub "$sub_id" \
+			--argjson outbound "$canonical" \
+			'{id:$id,name:$name,source_type:"subscription",source_id:$sub,enabled:true,outbound:$outbound}')"
+		tmp_nodes="${new_nodes}.tmp"
+		jq --argjson node "$node_json" '. + [$node]' "$new_nodes" > "$tmp_nodes"
+		mv "$tmp_nodes" "$new_nodes"
+	done
+
+	tmp_file="${NODES_FILE}.tmp"
+	jq -n --arg sub "$sub_id" --slurpfile old "$NODES_FILE" --slurpfile fresh "$new_nodes" \
+		'($old[0] | map(select(.source_id != $sub))) + $fresh[0]' > "$tmp_file"
+	mv "$tmp_file" "$NODES_FILE"
+	now="$(date +%s)"
+	tmp_file="${SUBSCRIPTIONS_FILE}.tmp"
+	jq --arg id "$sub_id" --argjson now "$now" \
+		'map(if .id == $id then .last_update=$now | .status="ok" else . end)' \
+		"$SUBSCRIPTIONS_FILE" > "$tmp_file"
+	mv "$tmp_file" "$SUBSCRIPTIONS_FILE"
+	rm -f "$download" "$new_nodes"
+	apply_generated_config
+	json_ok
+}
+
+require_commands
+ensure_state
+
+command_name="${1:-}"
+input="${2:-{}}"
+case "$command_name" in
+	status) status ;;
+	devices) devices ;;
+	nodes) nodes ;;
+	node-add) node_add "$input" ;;
+	node-delete) node_delete "$input" ;;
+	device-bind) device_bind "$input" ;;
+	wifi-status) wifi_status ;;
+	wifi-toggle) wifi_toggle "$input" ;;
+	ports) ports ;;
+	ports-apply) ports_apply "$input" ;;
+	ports-confirm) ports_confirm ;;
+	subscriptions) subscriptions ;;
+	subscription-add) subscription_add "$input" ;;
+	subscription-update) subscription_update "$input" ;;
+	generate)
+		candidate="$(generate_config)"
+		mv "$candidate" "$ACTIVE_CONFIG"
+		json_ok "\"path\":\"${ACTIVE_CONFIG}\""
+		;;
+	apply)
+		apply_generated_config
+		json_ok
+		;;
+	*) json_error "Unknown command" ;;
+esac

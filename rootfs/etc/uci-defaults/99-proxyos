@@ -1,0 +1,85 @@
+#!/bin/sh
+
+set -eu
+
+physical_interfaces() {
+	for net_path in /sys/class/net/*; do
+		[ -e "$net_path" ] || continue
+		iface="${net_path##*/}"
+		case "$iface" in
+			lo|br-*|docker*|veth*|tun*|tap*|wg*|proxyos*) continue ;;
+		esac
+		[ "$(cat "${net_path}/type" 2>/dev/null || true)" = "1" ] || continue
+		[ -e "${net_path}/device" ] || continue
+		device_path="$(readlink -f "${net_path}/device" 2>/dev/null || printf '%s' "$iface")"
+		printf '%s|%s\n' "$device_path" "$iface"
+	done | sort | cut -d '|' -f 2
+}
+
+ports="$(physical_interfaces)"
+port_count="$(printf '%s\n' "$ports" | sed '/^$/d' | wc -l)"
+
+uci set system.@system[0].hostname='ProxyOS'
+uci commit system
+
+if [ "$port_count" -ge 2 ]; then
+	wan_port="$(printf '%s\n' "$ports" | sed -n '1p')"
+	lan_ports="$(printf '%s\n' "$ports" | sed -n '2,$p')"
+
+	uci -q batch <<-EOF
+		set network.wan='interface'
+		set network.wan.proto='dhcp'
+		set network.wan.device='${wan_port}'
+		set network.br_lan='device'
+		set network.br_lan.name='br-lan'
+		set network.br_lan.type='bridge'
+		delete network.br_lan.ports
+		set network.lan='interface'
+		set network.lan.device='br-lan'
+		set network.lan.proto='static'
+		set network.lan.ipaddr='192.168.10.1'
+		set network.lan.netmask='255.255.255.0'
+	EOF
+	for lan_port in $lan_ports; do
+		uci add_list "network.br_lan.ports=${lan_port}"
+	done
+else
+	only_port="$(printf '%s\n' "$ports" | sed -n '1p')"
+	uci -q batch <<-EOF
+		set network.br_lan='device'
+		set network.br_lan.name='br-lan'
+		set network.br_lan.type='bridge'
+		delete network.br_lan.ports
+		set network.lan='interface'
+		set network.lan.device='br-lan'
+		set network.lan.proto='static'
+		set network.lan.ipaddr='192.168.10.1'
+		set network.lan.netmask='255.255.255.0'
+	EOF
+	[ -z "$only_port" ] || uci add_list "network.br_lan.ports=${only_port}"
+fi
+uci commit network
+
+uci set dhcp.lan.start='100'
+uci set dhcp.lan.limit='150'
+uci set dhcp.lan.leasetime='12h'
+uci -q delete dhcp.lan.dhcp_option
+uci add_list dhcp.lan.dhcp_option='6,1.1.1.1'
+uci set dhcp.lan.ra='disabled'
+uci set dhcp.lan.dhcpv6='disabled'
+uci set dhcp.lan.ndp='disabled'
+uci commit dhcp
+uci -q delete network.wan6
+uci set network.lan.delegate='0'
+uci commit network
+
+uci set uhttpd.main.home='/www'
+uci set uhttpd.main.ubus_prefix='/ubus'
+uci set uhttpd.main.rfc1918_filter='1'
+uci commit uhttpd
+
+/etc/init.d/sing-box disable >/dev/null 2>&1 || true
+/etc/init.d/proxyos enable
+/etc/init.d/rpcd reload >/dev/null 2>&1 || true
+
+exit 0

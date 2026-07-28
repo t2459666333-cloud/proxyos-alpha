@@ -1,0 +1,159 @@
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
+const root = path.resolve(import.meta.dirname, "../rootfs/www");
+const port = Number(process.env.PORT || 4173);
+
+const mock = {
+  status: {
+    version: "0.1.0-alpha",
+    hostname: "ProxyOS",
+    model: "Intel N100 · x86-64",
+    kernel: "6.12.74",
+    uptime: 187440,
+    load: [10680, 7220, 5080],
+    memory: {
+      total: 8589934592,
+      free: 3221225472,
+      buffered: 536870912,
+      cached: 2147483648,
+    },
+    node_count: 6,
+    bound_device_count: 4,
+    singbox_running: true,
+  },
+  devices: [
+    { name: "iPhone 16 Pro", mac: "AA:BB:CC:10:20:01", ip: "192.168.10.101", online: true, policy: "fixed_node", node_id: "hk01", connection: "Wi‑Fi 5 GHz" },
+    { name: "Pixel 10", mac: "AA:BB:CC:10:20:02", ip: "192.168.10.102", online: true, policy: "fixed_node", node_id: "us02", connection: "Wi‑Fi 5 GHz" },
+    { name: "Workstation", mac: "AA:BB:CC:10:20:03", ip: "192.168.10.103", online: true, policy: "fixed_node", node_id: "jp01", connection: "2.5G LAN" },
+    { name: "Living Room TV", mac: "AA:BB:CC:10:20:04", ip: "192.168.10.104", online: true, policy: "direct", node_id: "", connection: "Wi‑Fi 5 GHz" },
+    { name: "iPad Air", mac: "AA:BB:CC:10:20:05", ip: "192.168.10.105", online: false, policy: "block", node_id: "", connection: "Wi‑Fi 5 GHz" },
+  ],
+  nodes: [
+    { id: "hk01", name: "香港 01", protocol: "vless", source_type: "subscription", source_id: "sub01", server: "hk.example.com", server_port: 443, enabled: true },
+    { id: "us02", name: "美国住宅 02", protocol: "trojan", source_type: "subscription", source_id: "sub01", server: "us.example.com", server_port: 443, enabled: true },
+    { id: "jp01", name: "日本手动线路", protocol: "socks", source_type: "manual", source_id: "", server: "jp.example.com", server_port: 1080, enabled: true },
+    { id: "sg01", name: "新加坡 01", protocol: "hysteria2", source_type: "subscription", source_id: "sub01", server: "sg.example.com", server_port: 8443, enabled: true },
+    { id: "de01", name: "德国 01", protocol: "vmess", source_type: "subscription", source_id: "sub01", server: "de.example.com", server_port: 443, enabled: true },
+    { id: "uk01", name: "英国 01", protocol: "shadowsocks", source_type: "manual", source_id: "", server: "uk.example.com", server_port: 8388, enabled: true },
+  ],
+  wifi_status: { available: true, enabled: true, phy: "phy0", driver: "mt7921e", reason: "" },
+  ports: [
+    { name: "eth0", mac: "00:11:22:33:44:01", state: "up", speed_mbps: 2500, driver: "igc", role: "wan" },
+    { name: "eth1", mac: "00:11:22:33:44:02", state: "up", speed_mbps: 2500, driver: "igc", role: "lan" },
+    { name: "eth2", mac: "00:11:22:33:44:03", state: "down", speed_mbps: 0, driver: "igc", role: "lan" },
+    { name: "eth3", mac: "00:11:22:33:44:04", state: "down", speed_mbps: 0, driver: "igc", role: "unused" },
+  ],
+  subscriptions: [
+    { id: "sub01", name: "主线路订阅", format: "sing-box", last_update: Math.floor(Date.now() / 1000) - 1840, status: "ok", url_configured: true },
+  ],
+};
+
+function rpcResult(id, data, code = 0) {
+  return JSON.stringify({ jsonrpc: "2.0", id, result: [code, data] });
+}
+
+async function handleRpc(request, response) {
+  let body = "";
+  for await (const chunk of request) body += chunk;
+  const envelope = JSON.parse(body || "{}");
+  const [, object, method, params = {}] = envelope.params || [];
+  let data = {};
+
+  if (object === "session" && method === "login") {
+    data = { ubus_rpc_session: "preview-session" };
+  } else if (object === "proxyos") {
+    if (method in mock) data = mock[method];
+    else if (method === "node_add") {
+      const outbound = JSON.parse(params.outbound_json);
+      mock.nodes.push({
+        id: `node-${Date.now()}`,
+        name: params.name,
+        protocol: outbound.type,
+        source_type: "manual",
+        source_id: "",
+        server: outbound.server || "",
+        server_port: outbound.server_port || 0,
+        enabled: true,
+      });
+      mock.status.node_count = mock.nodes.length;
+      data = { ok: true };
+    } else if (method === "node_delete") {
+      mock.nodes = mock.nodes.filter((node) => node.id !== params.id);
+      mock.devices = mock.devices.map((device) =>
+        device.node_id === params.id
+          ? { ...device, policy: "block", node_id: "" }
+          : device,
+      );
+      mock.status.node_count = mock.nodes.length;
+      data = { ok: true };
+    } else if (method === "device_bind") {
+      mock.devices = mock.devices.map((device) =>
+        device.mac === params.mac ? { ...device, ...params } : device,
+      );
+      mock.status.bound_device_count = mock.devices.filter((device) => device.policy === "fixed_node").length;
+      data = { ok: true };
+    } else if (method === "wifi_toggle") {
+      mock.wifi_status.enabled = params.enabled;
+      data = { ok: true };
+    } else if (method === "ports_apply" || method === "ports_confirm" || method === "apply") {
+      data = { ok: true, confirmation_timeout: 90 };
+    } else if (method === "subscription_add") {
+      mock.subscriptions.push({
+        id: `sub-${Date.now()}`,
+        name: params.name,
+        format: "sing-box",
+        last_update: 0,
+        status: "new",
+        url_configured: true,
+      });
+      data = { ok: true };
+    } else if (method === "subscription_update") {
+      mock.subscriptions = mock.subscriptions.map((item) =>
+        item.id === params.id
+          ? { ...item, last_update: Math.floor(Date.now() / 1000), status: "ok" }
+          : item,
+      );
+      data = { ok: true };
+    } else {
+      data = { ok: true };
+    }
+  }
+
+  response.writeHead(200, { "Content-Type": "application/json" });
+  response.end(rpcResult(envelope.id, data));
+}
+
+createServer(async (request, response) => {
+  try {
+    if (request.url === "/ubus" && request.method === "POST") {
+      await handleRpc(request, response);
+      return;
+    }
+    const urlPath = new URL(request.url, "http://localhost").pathname;
+    const relative = urlPath === "/" ? "index.html" : urlPath.replace(/^\/+/, "");
+    const filePath = path.resolve(root, relative);
+    if (!filePath.startsWith(`${root}${path.sep}`) && filePath !== path.join(root, "index.html")) {
+      response.writeHead(403);
+      response.end("Forbidden");
+      return;
+    }
+    const extension = path.extname(filePath);
+    const contentTypes = {
+      ".html": "text/html; charset=utf-8",
+      ".css": "text/css; charset=utf-8",
+      ".js": "text/javascript; charset=utf-8",
+      ".svg": "image/svg+xml",
+    };
+    const content = await readFile(filePath);
+    response.writeHead(200, { "Content-Type": contentTypes[extension] || "application/octet-stream" });
+    response.end(content);
+  } catch {
+    response.writeHead(404);
+    response.end("Not found");
+  }
+}).listen(port, "127.0.0.1", () => {
+  console.log(`ProxyOS UI preview: http://127.0.0.1:${port}`);
+});
+

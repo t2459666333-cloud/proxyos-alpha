@@ -1,0 +1,34 @@
+{
+  "proxyos": {
+    "description": "Access the ProxyOS management service",
+    "read": {
+      "ubus": {
+        "proxyos": [
+          "status",
+          "devices",
+          "nodes",
+          "wifi_status",
+          "ports",
+          "subscriptions"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "proxyos": [
+          "node_add",
+          "node_delete",
+          "device_bind",
+          "wifi_toggle",
+          "ports_apply",
+          "ports_confirm",
+          "subscription_add",
+          "subscription_update",
+          "generate",
+          "apply"
+        ]
+      }
+    }
+  }
+}
+

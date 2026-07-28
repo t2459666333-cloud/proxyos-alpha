@@ -1,0 +1,16 @@
+[
+  {
+    "mac": "AA:BB:CC:DD:EE:01",
+    "ip": "192.168.10.101",
+    "name": "Phone A",
+    "policy": "fixed_node",
+    "node_id": "hk01"
+  },
+  {
+    "mac": "AA:BB:CC:DD:EE:02",
+    "ip": "192.168.10.102",
+    "name": "Phone B",
+    "policy": "block",
+    "node_id": ""
+  }
+]

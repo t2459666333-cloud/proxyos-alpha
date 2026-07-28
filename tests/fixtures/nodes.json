@@ -1,0 +1,14 @@
+[
+  {
+    "id": "hk01",
+    "name": "Hong Kong 01",
+    "source_type": "manual",
+    "source_id": "",
+    "enabled": true,
+    "outbound": {
+      "type": "socks",
+      "server": "192.0.2.10",
+      "server_port": 1080
+    }
+  }
+]
