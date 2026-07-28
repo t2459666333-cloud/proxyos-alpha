@@ -29,6 +29,17 @@ jobs:
             bash ./tests/run-controller-test.sh
       - name: Build images
         run: bash ./scripts/build-image.sh
+      - name: Verify boot images and checksums
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          for archive in ./*.img.gz; do
+            gzip -t "$archive"
+            image="/tmp/$(basename "${archive%.gz}")"
+            gzip -dc "$archive" > "$image"
+            node ../tools/verify-image.mjs "$image"
+            rm -f "$image"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: proxyos-alpha-x86_64

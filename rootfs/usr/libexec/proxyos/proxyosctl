@@ -138,7 +138,7 @@ status() {
 		--argjson bound "$bound_count" \
 		--argjson running "$singbox_running" \
 		'{
-			version:"0.2.1-alpha",
+			version:"0.2.2-alpha",
 			hostname:($board.hostname // "ProxyOS"),
 			model:($board.model // "x86-64"),
 			kernel:($board.kernel // ""),
@@ -166,7 +166,7 @@ devices() {
 				--arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" \
 				--arg ip "$ip" \
 				--arg name "$hostname" \
-				'{mac:$mac,ip:$ip,name:$name,online:true}' >> "$tmp_discovered"
+				'{mac:$mac,ip:$ip,name:$name,online:false,lease_registered:true}' >> "$tmp_discovered"
 		done < /tmp/dhcp.leases
 	fi
 
@@ -192,7 +192,7 @@ devices() {
 
 	ip neigh show dev "$lan_device" 2>/dev/null |
 	awk '
-		/lladdr/ && $NF != "FAILED" {
+		/lladdr/ && ($NF == "REACHABLE" || $NF == "DELAY" || $NF == "PROBE" || $NF == "PERMANENT") {
 			for (i = 1; i <= NF; i++) {
 				if ($i == "lladdr" && (i + 1) <= NF) {
 					print $1, $(i + 1)
@@ -270,10 +270,11 @@ node_get() {
 	' "$NODES_FILE" 2>/dev/null || json_error "Node not found"
 }
 
-validate_proxy_outbound() {
+check_proxy_outbound() {
 	outbound_json="$1"
 	test_config="/tmp/proxyos-outbound-check.$$.json"
 	test_log="/tmp/proxyos-outbound-check.$$.log"
+	PROXYOS_VALIDATION_ERROR=""
 	jq -n --argjson outbound "$outbound_json" '{
 		log:{level:"error"},
 		inbounds:[{type:"mixed",tag:"validation-in",listen:"127.0.0.1",listen_port:20808}],
@@ -281,11 +282,21 @@ validate_proxy_outbound() {
 		route:{rules:[],final:"validation-node"}
 	}' > "$test_config"
 	if ! "$SINGBOX" check -c "$test_config" >"$test_log" 2>&1; then
-		validation_error="$(tail -n 1 "$test_log" 2>/dev/null || printf 'invalid outbound')"
+		PROXYOS_VALIDATION_ERROR="$(tail -n 1 "$test_log" 2>/dev/null || printf 'invalid outbound')"
 		rm -f "$test_config" "$test_log"
-		json_error "Invalid node configuration: ${validation_error}"
+		return 1
 	fi
 	rm -f "$test_config" "$test_log"
+	return 0
+}
+
+validate_proxy_outbound() {
+	if [ "${PROXYOS_SKIP_CONFIG_CHECK:-0}" = "1" ]; then
+		return 0
+	fi
+	if ! check_proxy_outbound "$1"; then
+		json_error "Invalid node configuration: ${PROXYOS_VALIDATION_ERROR}"
+	fi
 }
 
 node_add() {
@@ -420,6 +431,38 @@ probe_node() {
 	printf '%s|%s\n' "$status" "$latency"
 }
 
+fetch_public_ip() {
+	proxy_url="${1:-}"
+	for endpoint in \
+		"https://api.ip.sb/ip" \
+		"https://icanhazip.com" \
+		"https://api.ipify.org"; do
+		if [ -n "$proxy_url" ]; then
+			probe_response="$(
+				curl -4 --fail --silent --show-error --location \
+					--proxy "$proxy_url" \
+					--connect-timeout 3 --max-time 8 \
+					--write-out '\n%{time_total}' \
+					"$endpoint" 2>/dev/null || true
+			)"
+		else
+			probe_response="$(
+				curl -4 --fail --silent --show-error --location \
+					--connect-timeout 3 --max-time 8 \
+					--write-out '\n%{time_total}' \
+					"$endpoint" 2>/dev/null || true
+			)"
+		fi
+		probe_ip="$(printf '%s\n' "$probe_response" | sed '$d' | tr -d '\r\n[:space:]')"
+		probe_time="$(printf '%s\n' "$probe_response" | tail -n 1)"
+		if printf '%s' "$probe_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+			printf '%s|%s\n' "$probe_ip" "$probe_time"
+			return 0
+		fi
+	done
+	return 1
+}
+
 probe_node_egress() {
 	node_id="$1"
 	outbound="$(jq -c --arg id "$node_id" '.[] | select(.id == $id) | .outbound' "$NODES_FILE")"
@@ -444,22 +487,17 @@ probe_node_egress() {
 	"$SINGBOX" run -c "$test_config" >"$test_log" 2>&1 &
 	test_pid="$!"
 	sleep 1
-	probe_result="$(
-		curl --fail --silent --show-error --output /dev/null \
-			--proxy "socks5h://127.0.0.1:${test_port}" \
-			--connect-timeout 5 --max-time 12 \
-			--write-out '%{time_total}' \
-			https://api.ipify.org 2>/dev/null || true
-	)"
+	probe_result="$(fetch_public_ip "socks5h://127.0.0.1:${test_port}" || true)"
 	kill "$test_pid" >/dev/null 2>&1 || true
 	wait "$test_pid" 2>/dev/null || true
 	rm -f "$test_config" "$test_log"
 	case "$probe_result" in
-		""|0|0.0|0.00|0.000|0.0000|0.00000|0.000000)
+		""|*\|)
 			printf 'error|null\n'
 			;;
 		*)
-			latency="$(awk "BEGIN { printf \"%d\", (${probe_result} * 1000) }")"
+			probe_time="${probe_result#*|}"
+			latency="$(awk "BEGIN { printf \"%d\", (${probe_time} * 1000) }")"
 			printf 'available|%s\n' "$latency"
 			;;
 	esac
@@ -511,11 +549,24 @@ health_check() {
 	changed=false
 	health_snapshot="/tmp/proxyos-health-snapshot.$$.json"
 	health_updates="/tmp/proxyos-health-updates.$$.jsonl"
+	health_cursor_file="/tmp/proxyos-health.cursor"
+	health_batch_size="${PROXYOS_HEALTH_BATCH_SIZE:-8}"
 	cp "$NODES_FILE" "$health_snapshot"
 	: > "$health_updates"
-	for node_id in $(jq -r '.[].id' "$health_snapshot"); do
+	health_node_count="$(jq 'length' "$health_snapshot")"
+	if [ "$health_node_count" -eq 0 ]; then
+		rm -f "$health_snapshot" "$health_updates" "$health_cursor_file"
+		json_ok '"tested":0'
+	fi
+	health_cursor="$(cat "$health_cursor_file" 2>/dev/null || printf '0')"
+	printf '%s' "$health_cursor" | grep -Eq '^[0-9]+$' || health_cursor=0
+	health_cursor=$((health_cursor % health_node_count))
+	health_tested=0
+	while [ "$health_tested" -lt "$health_batch_size" ] && [ "$health_tested" -lt "$health_node_count" ]; do
+		health_index=$(((health_cursor + health_tested) % health_node_count))
+		node_id="$(jq -r --argjson index "$health_index" '.[$index].id' "$health_snapshot")"
 		old_status="$(jq -r --arg id "$node_id" '.[] | select(.id == $id) | .status // "unknown"' "$health_snapshot")"
-		result="$(probe_node "$node_id")"
+		result="$(probe_node_egress "$node_id")"
 		new_status="${result%%|*}"
 		latency="${result#*|}"
 		now="$(date +%s)"
@@ -523,8 +574,11 @@ health_check() {
 			--argjson latency "$latency" --argjson now "$now" \
 			'{id:$id,status:$status,latency_ms:$latency,last_test:$now}' >> "$health_updates"
 		[ "$new_status" = "$old_status" ] || changed=true
+		health_tested=$((health_tested + 1))
 	done
+	printf '%s\n' "$(((health_cursor + health_tested) % health_node_count))" > "$health_cursor_file"
 	acquire_mutation_lock
+	assert_state_writable
 	health_rollback="${NODES_FILE}.rollback.$$"
 	cp "$NODES_FILE" "$health_rollback"
 	health_tmp="${NODES_FILE}.health.$$"
@@ -547,7 +601,7 @@ health_check() {
 		fi
 	fi
 	rm -f "$health_rollback"
-	json_ok "\"tested\":$(jq 'length' "$NODES_FILE")"
+	json_ok "\"tested\":${health_tested},\"total\":${health_node_count}"
 }
 
 egress_check() {
@@ -627,22 +681,14 @@ egress_check() {
 		mode="node"
 	fi
 	if [ -n "$test_pid" ]; then
-		public_ip="$(
-			curl --fail --silent --show-error --location \
-				--proxy "socks5://127.0.0.1:${test_port}" \
-				--connect-timeout 8 --max-time 15 \
-				https://api.ipify.org 2>/dev/null || true
-		)"
+		public_result="$(fetch_public_ip "socks5h://127.0.0.1:${test_port}" || true)"
 		kill "$test_pid" >/dev/null 2>&1 || true
 		wait "$test_pid" 2>/dev/null || true
 	else
-		public_ip="$(
-			curl --fail --silent --show-error --location \
-				--connect-timeout 8 --max-time 12 \
-				https://api.ipify.org 2>/dev/null || true
-		)"
+		public_result="$(fetch_public_ip "" || true)"
 	fi
 	rm -f "$test_config" "$test_log"
+	public_ip="${public_result%%|*}"
 	printf '%s' "$public_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' ||
 		json_error "Public exit IP request failed"
 	jq -n --arg ip "$public_ip" --arg mode "$mode" --arg node_id "$node_id" --arg mac "$device_mac" \
@@ -671,6 +717,12 @@ device_bind() {
 	if [ "$policy" = "fixed_node" ]; then
 		jq -e --arg id "$node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
 			json_error "Selected node does not exist"
+		probe_result="$(probe_node_egress "$node_id")"
+		probe_status="${probe_result%%|*}"
+		probe_latency="${probe_result#*|}"
+		save_probe "$node_id" "$probe_status" "$probe_latency"
+		[ "$probe_status" = "available" ] ||
+			json_error "所选节点无法建立真实代理出口，设备策略未更改"
 	fi
 	if [ -n "$backup_node_id" ]; then
 		jq -e --arg id "$backup_node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
@@ -692,27 +744,32 @@ device_bind() {
 			auto_source:$source
 		}')"
 	devices_rollback="${DEVICES_FILE}.rollback.$$"
-	cp "$DEVICES_FILE" "$devices_rollback"
+	cp "$DEVICES_FILE" "$devices_rollback" ||
+		json_error "无法创建设备策略回滚文件，请检查系统存储"
 	tmp_file="${DEVICES_FILE}.tmp.$$"
 	jq --arg mac "$mac" --argjson device "$device_json" \
-		'map(select(.mac != $mac)) + [$device]' "$DEVICES_FILE" > "$tmp_file"
-	mv "$tmp_file" "$DEVICES_FILE"
+		'map(select(.mac != $mac)) + [$device]' "$DEVICES_FILE" > "$tmp_file" ||
+		json_error "无法生成设备策略，请检查系统存储"
+	mv "$tmp_file" "$DEVICES_FILE" ||
+		json_error "无法保存设备策略，请检查启动盘或 Overlay 文件系统"
 	if ! apply_generated_config_raw; then
 		mv "$devices_rollback" "$DEVICES_FILE"
 		json_error "$APPLY_ERROR"
 	fi
 	rm -f "$devices_rollback"
 
-	existing_section="$(uci show dhcp 2>/dev/null |
-		sed -n "s/^\(dhcp\.[^.]*\)\.mac='${mac}'$/\1/p" | head -n 1)"
-	if [ -z "$existing_section" ]; then
-		existing_section="dhcp.$(uci add dhcp host)"
+	if [ "${PROXYOS_SKIP_DHCP:-0}" != "1" ]; then
+		existing_section="$(uci show dhcp 2>/dev/null |
+			sed -n "s/^\(dhcp\.[^.]*\)\.mac='${mac}'$/\1/p" | head -n 1)"
+		if [ -z "$existing_section" ]; then
+			existing_section="dhcp.$(uci add dhcp host)"
+		fi
+		uci set "${existing_section}.name=${name}"
+		uci set "${existing_section}.mac=${mac}"
+		uci set "${existing_section}.ip=${ip}"
+		uci commit dhcp
+		/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
 	fi
-	uci set "${existing_section}.name=${name}"
-	uci set "${existing_section}.mac=${mac}"
-	uci set "${existing_section}.ip=${ip}"
-	uci commit dhcp
-	/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
 
 	json_ok
 }
@@ -1227,7 +1284,7 @@ subscription_add() {
 	[ -n "$name" ] && [ -n "$url" ] || json_error "Subscription name and URL are required"
 	sub_id="$(printf '%s|%s' "$name" "$url" | sha256sum | cut -c 1-16)"
 	sub_json="$(jq -n --arg id "$sub_id" --arg name "$name" --arg url "$url" \
-		'{id:$id,name:$name,url:$url,format:"auto",node_count:0,last_update:0,status:"new",error:""}')"
+		'{id:$id,name:$name,url:$url,format:"auto",node_count:0,skipped_count:0,last_update:0,status:"new",error:"",warning:""}')"
 	tmp_file="${SUBSCRIPTIONS_FILE}.tmp.$$"
 	jq --arg id "$sub_id" --argjson sub "$sub_json" \
 		'map(select(.id != $id)) + [$sub]' "$SUBSCRIPTIONS_FILE" > "$tmp_file"
@@ -1237,6 +1294,46 @@ subscription_add() {
 
 subscriptions() {
 	jq '{items: map(del(.url) + {url_configured:(.url | length > 0)})}' "$SUBSCRIPTIONS_FILE"
+}
+
+subscription_get() {
+	input="$1"
+	sub_id="$(printf '%s' "$input" | jq -r '.id // empty')"
+	[ -n "$sub_id" ] || json_error "Subscription id is required"
+	jq -e --arg id "$sub_id" '
+		.[] | select(.id == $id) |
+		. + {
+			skipped_count:(.skipped_count // 0),
+			warning:(.warning // ""),
+			error:(.error // "")
+		}
+	' "$SUBSCRIPTIONS_FILE" 2>/dev/null || json_error "Subscription not found"
+}
+
+subscription_save() {
+	input="$1"
+	sub_id="$(printf '%s' "$input" | jq -r '.id // empty')"
+	name="$(printf '%s' "$input" | jq -r '.name // empty')"
+	url="$(printf '%s' "$input" | jq -r '.url // empty')"
+	[ -n "$sub_id" ] && [ -n "$name" ] && [ -n "$url" ] ||
+		json_error "Subscription id, name, and URL are required"
+	case "$url" in
+		http://*|https://*) ;;
+		*) json_error "Subscription URL must use HTTP or HTTPS" ;;
+	esac
+	jq -e --arg id "$sub_id" 'any(.[]; .id == $id)' "$SUBSCRIPTIONS_FILE" >/dev/null ||
+		json_error "Subscription not found"
+	save_tmp="${SUBSCRIPTIONS_FILE}.tmp.$$"
+	jq --arg id "$sub_id" --arg name "$name" --arg url "$url" '
+		map(if .id == $id then
+			.name=$name |
+			.url=$url
+		else . end)
+	' "$SUBSCRIPTIONS_FILE" > "$save_tmp" ||
+		json_error "Subscription settings could not be prepared"
+	mv "$save_tmp" "$SUBSCRIPTIONS_FILE" ||
+		json_error "Subscription settings could not be saved"
+	json_ok "\"id\":\"${sub_id}\""
 }
 
 subscription_mark_error() {
@@ -1303,7 +1400,48 @@ subscription_update() {
 		json_error "$error_text"
 	fi
 	format="$(jq -r '.format' "$parsed")"
-	node_count="$(jq '.nodes | length' "$parsed")"
+	candidate_count="$(jq '.nodes | length' "$parsed")"
+	parser_skipped_count="$(jq '.skipped // [] | length' "$parsed")"
+	parsed_count=$((candidate_count + parser_skipped_count))
+
+	# Validate every outbound independently. Real-world subscriptions often
+	# contain one stale, provider-specific, or malformed entry among many good
+	# nodes. A single bad record must not make the whole subscription unusable.
+	valid_nodes="/tmp/proxyos-subscription.$$.valid-nodes.json"
+	skipped_nodes="/tmp/proxyos-subscription.$$.skipped-nodes.json"
+	printf '[]\n' > "$valid_nodes"
+	jq '.skipped // []' "$parsed" > "$skipped_nodes"
+	node_index=0
+	while [ "$node_index" -lt "$candidate_count" ]; do
+		node_json="$(jq -c ".nodes[${node_index}]" "$parsed")"
+		outbound_json="$(printf '%s' "$node_json" | jq -c '.outbound')"
+		if [ "${PROXYOS_SKIP_CONFIG_CHECK:-0}" = "1" ] ||
+			check_proxy_outbound "$outbound_json"; then
+			valid_tmp="${valid_nodes}.tmp"
+			jq --argjson node "$node_json" '. + [$node]' "$valid_nodes" > "$valid_tmp"
+			mv "$valid_tmp" "$valid_nodes"
+		else
+			node_name="$(printf '%s' "$node_json" | jq -r '.name // "Unnamed node"')"
+			skipped_tmp="${skipped_nodes}.tmp"
+			jq --arg name "$node_name" --arg error "$PROXYOS_VALIDATION_ERROR" \
+				'. + [{name:$name,error:$error}]' "$skipped_nodes" > "$skipped_tmp"
+			mv "$skipped_tmp" "$skipped_nodes"
+		fi
+		node_index=$((node_index + 1))
+	done
+
+	node_count="$(jq 'length' "$valid_nodes")"
+	skipped_count="$(jq 'length' "$skipped_nodes")"
+	if [ "$node_count" -eq 0 ]; then
+		error_text="$(jq -r '.[0].error // "No compatible nodes were found"' "$skipped_nodes")"
+		subscription_mark_error "$sub_id" "$error_text"
+		rm -f "$download" "$parsed" "$parser_error" "$valid_nodes" "$skipped_nodes"
+		json_error "No compatible proxy nodes could be imported: ${error_text}"
+	fi
+	parsed_valid="${parsed}.valid"
+	jq --slurpfile valid "$valid_nodes" --slurpfile skipped "$skipped_nodes" \
+		'.nodes=$valid[0] | .skipped=$skipped[0]' "$parsed" > "$parsed_valid"
+	mv "$parsed_valid" "$parsed"
 
 	tmp_file="${NODES_FILE}.tmp.$$"
 	jq -n --arg sub "$sub_id" --slurpfile old "$NODES_FILE" --slurpfile parsed "$parsed" '
@@ -1329,7 +1467,7 @@ subscription_update() {
 		! "$SINGBOX" check -c "$staged_config" >"$staged_log" 2>&1; then
 		error_text="$(tail -n 1 "$staged_log" 2>/dev/null || printf 'Generated sing-box configuration is invalid')"
 		subscription_mark_error "$sub_id" "$error_text"
-		rm -f "$download" "$parsed" "$parser_error" "$tmp_file" "$staged_config" "$staged_log"
+		rm -f "$download" "$parsed" "$parser_error" "$valid_nodes" "$skipped_nodes" "$tmp_file" "$staged_config" "$staged_log"
 		json_error "Subscription contains an unsupported or invalid node: ${error_text}"
 	fi
 	rm -f "$staged_config" "$staged_log"
@@ -1339,32 +1477,39 @@ subscription_update() {
 	cp "$SUBSCRIPTIONS_FILE" "$subscriptions_rollback"
 	mv "$tmp_file" "$NODES_FILE"
 	now="$(date +%s)"
+	warning=""
+	if [ "$skipped_count" -gt 0 ]; then
+		warning="Imported ${node_count} nodes and skipped ${skipped_count} incompatible nodes"
+	fi
 	tmp_file="${SUBSCRIPTIONS_FILE}.tmp.$$"
-	jq --arg id "$sub_id" --argjson now "$now" --arg format "$format" --argjson count "$node_count" \
+	jq --arg id "$sub_id" --argjson now "$now" --arg format "$format" \
+		--argjson count "$node_count" --argjson skipped "$skipped_count" --arg warning "$warning" \
 		'map(if .id == $id then
 			.last_update=$now |
 			.status="ok" |
 			.error="" |
+			.warning=$warning |
 			.format=$format |
-			.node_count=$count
+			.node_count=$count |
+			.skipped_count=$skipped
 		else . end)' \
 		"$SUBSCRIPTIONS_FILE" > "$tmp_file"
 	mv "$tmp_file" "$SUBSCRIPTIONS_FILE"
-	rm -f "$download" "$parsed" "$parser_error"
+	rm -f "$download" "$parsed" "$parser_error" "$valid_nodes" "$skipped_nodes"
 	if ! apply_generated_config_raw; then
 		mv "$nodes_rollback" "$NODES_FILE"
 		mv "$subscriptions_rollback" "$SUBSCRIPTIONS_FILE"
 		json_error "$APPLY_ERROR"
 	fi
 	rm -f "$nodes_rollback" "$subscriptions_rollback"
-	json_ok "\"format\":$(printf '%s' "$format" | jq -Rs .),\"node_count\":${node_count}"
+	json_ok "\"format\":$(printf '%s' "$format" | jq -Rs .),\"node_count\":${node_count},\"skipped_count\":${skipped_count},\"detected_count\":${parsed_count}"
 }
 
 policy_settings() {
 	default_policy="$(uci -q get proxyos.main.default_policy || printf 'direct')"
 	default_node_id="$(uci -q get proxyos.main.default_node_id || true)"
 	jq -n --arg policy "$default_policy" --arg node "$default_node_id" \
-		'{default_policy:$policy,default_node_id:$node,health_interval:300,fail_closed:true}'
+		'{default_policy:$policy,default_node_id:$node,health_interval:300,health_batch_size:8,fail_closed:true}'
 }
 
 policy_apply() {
@@ -1480,7 +1625,7 @@ system_logs() {
 }
 
 update_check() {
-	current_version="0.2.1-alpha"
+	current_version="0.2.2-alpha"
 	release_api="$(uci -q get proxyos.main.release_api || printf 'https://api.github.com/repos/t2459666333-cloud/proxyos-alpha/releases/latest')"
 	release_file="/tmp/proxyos-release.$$.json"
 	release_error="/tmp/proxyos-release.$$.error"
@@ -1518,12 +1663,21 @@ acquire_mutation_lock() {
 			rm -rf "$mutation_lock"
 			continue
 		fi
-		[ "$mutation_wait" -lt 5 ] || json_error "Another ProxyOS change is still being applied"
+		[ "$mutation_wait" -lt 20 ] || json_error "另一项 ProxyOS 设置仍在应用，请稍后重试"
 		sleep 1
 		mutation_wait=$((mutation_wait + 1))
 	done
 	printf '%s\n' "$$" > "${mutation_lock}/pid"
 	trap 'rm -rf /tmp/proxyos-mutation.lock' EXIT HUP INT TERM
+}
+
+assert_state_writable() {
+	write_probe="${STATE_DIR}/.proxyos-write-test.$$"
+	if ! (umask 077; printf '%s\n' "$$" > "$write_probe") 2>/dev/null; then
+		json_error "系统存储无法写入，设备策略不会生效；请更换或重新写入启动盘"
+	fi
+	rm -f "$write_probe" ||
+		json_error "系统存储写入检查失败，请检查启动盘或 Overlay 文件系统"
 }
 
 command_name="${1:-}"
@@ -1534,8 +1688,9 @@ require_commands
 ensure_state
 
 case "$command_name" in
-	node-add|node-update|node-delete|node-test|device-bind|wifi-toggle|wifi-apply|wifi-disconnect|ports-apply|ports-confirm|subscription-add|subscription-update|subscription-delete|policy-apply|backup-restore|password-set|system-reboot|apply)
+	node-add|node-update|node-delete|node-test|device-bind|wifi-toggle|wifi-apply|wifi-disconnect|ports-apply|ports-confirm|subscription-add|subscription-save|subscription-update|subscription-delete|policy-apply|backup-restore|password-set|system-reboot|apply)
 		acquire_mutation_lock
+		assert_state_writable
 		;;
 esac
 
@@ -1560,7 +1715,9 @@ case "$command_name" in
 	ports-apply) ports_apply "$input" ;;
 	ports-confirm) ports_confirm ;;
 	subscriptions) subscriptions ;;
+	subscription-get) subscription_get "$input" ;;
 	subscription-add) subscription_add "$input" ;;
+	subscription-save) subscription_save "$input" ;;
 	subscription-update) subscription_update "$input" ;;
 	subscription-delete) subscription_delete "$input" ;;
 	policy-settings) policy_settings ;;

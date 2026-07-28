@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 
 INTERNAL_TYPES = {"direct", "block", "selector", "urltest", "dns"}
+TLS_REQUIRED_TYPES = {"trojan", "hysteria", "hysteria2", "tuic", "anytls"}
 SUPPORTED_LINK_SCHEMES = {
     "ss",
     "vmess",
@@ -32,6 +33,12 @@ SUPPORTED_LINK_SCHEMES = {
     "anytls",
     "wireguard",
 }
+METADATA_NODE_NAME = re.compile(
+    r"(剩余流量|流量剩余|到期时间|过期时间|套餐到期|下次重置|流量重置|"
+    r"官网|官方网站|更新订阅|联系客服|remaining\s+traffic|traffic\s+reset|"
+    r"expire[sd]?|expiration|subscription\s+info)",
+    re.IGNORECASE,
+)
 
 
 def b64decode_text(value: str) -> str:
@@ -87,9 +94,11 @@ def transport_from_query(query: dict[str, list[str]]) -> dict[str, Any] | None:
     return transport
 
 
-def tls_from_query(query: dict[str, list[str]], host: str) -> dict[str, Any] | None:
+def tls_from_query(
+    query: dict[str, list[str]], host: str, *, required: bool = False
+) -> dict[str, Any] | None:
     security = query_first(query, "security")
-    enabled = security in {"tls", "reality"} or truthy(query_first(query, "tls"))
+    enabled = required or security in {"tls", "reality"} or truthy(query_first(query, "tls"))
     if not enabled:
         return None
     tls: dict[str, Any] = {
@@ -235,7 +244,7 @@ def parse_standard_uri(link: str) -> tuple[str, dict[str, Any]]:
         )
 
     transport = transport_from_query(query)
-    tls = tls_from_query(query, host)
+    tls = tls_from_query(query, host, required=outbound_type in TLS_REQUIRED_TYPES)
     if transport:
         outbound["transport"] = transport
     if tls and outbound_type not in {"http", "socks", "ssh", "wireguard"}:
@@ -327,7 +336,7 @@ def clash_proxy_to_outbound(proxy: dict[str, Any]) -> tuple[str, dict[str, Any]]
             }
         )
 
-    if truthy(proxy.get("tls")) or proxy.get("reality-opts"):
+    if outbound_type in TLS_REQUIRED_TYPES or truthy(proxy.get("tls")) or proxy.get("reality-opts"):
         reality = proxy.get("reality-opts") or {}
         outbound["tls"] = compact(
             {
@@ -351,10 +360,52 @@ def clash_proxy_to_outbound(proxy: dict[str, Any]) -> tuple[str, dict[str, Any]]
                 ),
             }
         )
+    if outbound_type == "hysteria2" and proxy.get("obfs"):
+        outbound["obfs"] = compact(
+            {
+                "type": proxy.get("obfs"),
+                "password": proxy.get("obfs-password") or proxy.get("obfs_password"),
+            }
+        )
     return name, compact(outbound)
 
 
-def detect_payload(text: str) -> tuple[str, list[tuple[str, dict[str, Any]]]]:
+def parse_link_entries(links: list[str]) -> tuple[list[tuple[str, dict[str, Any]]], list[dict[str, str]]]:
+    entries: list[tuple[str, dict[str, Any]]] = []
+    skipped: list[dict[str, str]] = []
+    for link in links:
+        try:
+            entries.append(parse_link(link))
+        except Exception as exc:
+            scheme = link.split(":", 1)[0].lower() or "unknown"
+            skipped.append({"name": f"{scheme} link", "error": str(exc)})
+    return entries, skipped
+
+
+def parse_clash_entries(
+    proxies: list[Any],
+) -> tuple[list[tuple[str, dict[str, Any]]], list[dict[str, str]]]:
+    entries: list[tuple[str, dict[str, Any]]] = []
+    skipped: list[dict[str, str]] = []
+    for index, item in enumerate(proxies):
+        if not isinstance(item, dict):
+            skipped.append({"name": f"Clash entry {index + 1}", "error": "node is not an object"})
+            continue
+        try:
+            entries.append(clash_proxy_to_outbound(item))
+        except Exception as exc:
+            skipped.append(
+                {
+                    "name": str(item.get("name") or f"Clash entry {index + 1}"),
+                    "error": str(exc),
+                }
+            )
+    return entries, skipped
+
+
+def detect_payload(
+    text: str,
+) -> tuple[str, list[tuple[str, dict[str, Any]]], list[dict[str, str]]]:
     stripped = text.strip().lstrip("\ufeff")
     parsed_json: Any = None
     try:
@@ -367,15 +418,29 @@ def detect_payload(text: str) -> tuple[str, list[tuple[str, dict[str, Any]]]]:
             (str(item.get("tag") or f"{item.get('server', '')}:{item.get('server_port', '')}"), item)
             for item in parsed_json["outbounds"]
             if isinstance(item, dict) and item.get("type") not in INTERNAL_TYPES
-        ]
+        ], []
     if isinstance(parsed_json, list):
+        if all(isinstance(item, str) for item in parsed_json):
+            entries, skipped = parse_link_entries([str(item) for item in parsed_json])
+            return "json-links", entries, skipped
         return "sing-box", [
             (str(item.get("tag") or f"{item.get('server', '')}:{item.get('server_port', '')}"), item)
             for item in parsed_json
             if isinstance(item, dict) and item.get("type") not in INTERNAL_TYPES
-        ]
+        ], []
     if isinstance(parsed_json, dict) and isinstance(parsed_json.get("proxies"), list):
-        return "clash-json", [clash_proxy_to_outbound(item) for item in parsed_json["proxies"]]
+        entries, skipped = parse_clash_entries(parsed_json["proxies"])
+        return "clash-json", entries, skipped
+    if isinstance(parsed_json, dict):
+        for key in ("links", "nodes", "servers", "data"):
+            value = parsed_json.get(key)
+            if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                entries, skipped = parse_link_entries([str(item) for item in value])
+                return "json-links", entries, skipped
+        for key in ("data", "subscription", "content"):
+            value = parsed_json.get(key)
+            if isinstance(value, str) and value.strip() and value.strip() != stripped:
+                return detect_payload(value)
 
     if re.search(r"(?m)^\s*proxies\s*:", stripped):
         try:
@@ -386,7 +451,8 @@ def detect_payload(text: str) -> tuple[str, list[tuple[str, dict[str, Any]]]]:
         proxies = payload.get("proxies") if isinstance(payload, dict) else None
         if not isinstance(proxies, list):
             raise ValueError("Clash YAML does not contain a proxies list")
-        return "clash-yaml", [clash_proxy_to_outbound(item) for item in proxies if isinstance(item, dict)]
+        entries, skipped = parse_clash_entries(proxies)
+        return "clash-yaml", entries, skipped
 
     candidate = stripped
     if not any(candidate.startswith(f"{scheme}://") for scheme in SUPPORTED_LINK_SCHEMES):
@@ -401,7 +467,11 @@ def detect_payload(text: str) -> tuple[str, list[tuple[str, dict[str, Any]]]]:
     ]
     if not links:
         raise ValueError("unrecognized subscription format")
-    return ("base64-links" if candidate != stripped else "share-links"), [parse_link(link) for link in links]
+    entries, skipped = parse_link_entries(links)
+    if not entries:
+        first_error = skipped[0]["error"] if skipped else "no supported links"
+        raise ValueError(f"subscription contains no supported proxy links: {first_error}")
+    return ("base64-links" if candidate != stripped else "share-links"), entries, skipped
 
 
 def stable_id(subscription_id: str, outbound: dict[str, Any]) -> str:
@@ -422,18 +492,28 @@ def stable_id(subscription_id: str, outbound: dict[str, Any]) -> str:
 
 
 def normalize(subscription_id: str, text: str) -> dict[str, Any]:
-    detected_format, entries = detect_payload(text)
+    detected_format, entries, skipped = detect_payload(text)
     nodes: list[dict[str, Any]] = []
     seen: set[str] = set()
     for name, raw_outbound in entries:
-        outbound = compact(dict(raw_outbound))
-        outbound.pop("tag", None)
+        try:
+            outbound = compact(dict(raw_outbound))
+            outbound.pop("tag", None)
+        except Exception as exc:
+            skipped.append({"name": str(name or "Unnamed node"), "error": str(exc)})
+            continue
+        if METADATA_NODE_NAME.search(str(name or "")):
+            skipped.append({"name": str(name), "error": "subscription metadata entry"})
+            continue
         if outbound.get("type") in INTERNAL_TYPES:
+            skipped.append({"name": str(name or "Internal node"), "error": "internal outbound type"})
             continue
         if not outbound.get("type") or not outbound.get("server") or not outbound.get("server_port"):
+            skipped.append({"name": str(name or "Unnamed node"), "error": "missing protocol, server, or port"})
             continue
         node_id = stable_id(subscription_id, outbound)
         if node_id in seen:
+            skipped.append({"name": str(name or "Duplicate node"), "error": "duplicate proxy node"})
             continue
         seen.add(node_id)
         nodes.append(
@@ -450,7 +530,7 @@ def normalize(subscription_id: str, text: str) -> dict[str, Any]:
         )
     if not nodes:
         raise ValueError("subscription contains no supported proxy nodes")
-    return {"format": detected_format, "nodes": nodes}
+    return {"format": detected_format, "nodes": nodes, "skipped": skipped}
 
 
 def main() -> int:

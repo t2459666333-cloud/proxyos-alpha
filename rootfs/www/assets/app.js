@@ -13,9 +13,14 @@ const state = {
   policy: { default_policy: "direct", default_node_id: "" },
   selectedDevice: null,
   selectedDevices: new Set(),
+  egressByDevice: new Map(),
+  egressQueueRunning: false,
   editingNode: "",
+  editingSubscription: "",
   nodeSource: "all",
   nodeHealth: "all",
+  nodeSubscription: "all",
+  drawerNodeSource: "all",
   rollbackTimer: null,
   refreshTimer: null,
   loading: false,
@@ -94,7 +99,7 @@ function showToast(message, error = false) {
   showToast.timer = setTimeout(() => toast.classList.remove("is-visible"), 3200);
 }
 
-async function ubusCall(object, method, payload = {}, session = state.session, timeoutMs = 15000) {
+async function ubusCall(object, method, payload = {}, session = state.session, timeoutMs = 30000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
@@ -124,7 +129,8 @@ async function ubusCall(object, method, payload = {}, session = state.session, t
 }
 
 const api = (method, payload = {}) =>
-  ubusCall("proxyos", method, payload, state.session, method === "subscription_update" ? 45000 : 15000);
+  ubusCall("proxyos", method, payload, state.session,
+    ["subscription_update", "device_bind", "node_test"].includes(method) ? 90000 : 30000);
 const unwrapItems = (value) => (Array.isArray(value?.items) ? value.items : Array.isArray(value) ? value : []);
 
 async function login(username, password) {
@@ -182,6 +188,7 @@ async function loadAll({ quiet = false } = {}) {
   });
   renderAll();
   state.loading = false;
+  scheduleEgressChecks();
   if (!quiet) showToast(hadError ? "部分状态读取失败" : "状态已更新", hadError);
 }
 
@@ -192,7 +199,48 @@ function startRefreshLoop() {
   }, 15000);
 }
 
+async function scheduleEgressChecks() {
+  if (state.egressQueueRunning) return;
+  const pending = state.devices.filter((device) =>
+    device.online &&
+    device.policy !== "block" &&
+    !state.egressByDevice.has(device.mac),
+  );
+  if (!pending.length) return;
+  state.egressQueueRunning = true;
+  try {
+    for (const device of pending) await checkEgress(device.mac, { quiet: true });
+  } finally {
+    state.egressQueueRunning = false;
+  }
+}
+
 function nodeFor(device) { return state.nodes.find((node) => node.id === device.node_id); }
+function subscriptionForNode(node) {
+  return state.subscriptions.find((subscription) => subscription.id === node?.source_id);
+}
+function groupedNodeOptions(selectedId = "", { includeEmpty = false, source = "all" } = {}) {
+  const option = (node) =>
+    `<option value="${escapeHtml(node.id)}" ${selectedId === node.id ? "selected" : ""} ${node.status === "error" ? "disabled" : ""}>${escapeHtml(cleanNodeName(node.name))} · ${escapeHtml(node.protocol)}${node.status === "error" ? "（异常）" : ""}</option>`;
+  const groups = [];
+  if (includeEmpty) groups.push(`<option value="">未设置备用节点</option>`);
+  const manual = state.nodes.filter((node) => node.source_type !== "subscription");
+  if ((source === "all" || source === "manual") && manual.length) {
+    groups.push(`<optgroup label="手动节点">${manual.map(option).join("")}</optgroup>`);
+  }
+  if (source === "all" || source === "subscription") {
+    state.subscriptions.forEach((subscription) => {
+      const nodes = state.nodes.filter((node) => node.source_id === subscription.id);
+      if (nodes.length) {
+        groups.push(`<optgroup label="订阅 · ${escapeHtml(subscription.name)}">${nodes.map(option).join("")}</optgroup>`);
+      }
+    });
+    const knownIds = new Set(state.subscriptions.map((subscription) => subscription.id));
+    const ungrouped = state.nodes.filter((node) => node.source_type === "subscription" && !knownIds.has(node.source_id));
+    if (ungrouped.length) groups.push(`<optgroup label="其他订阅">${ungrouped.map(option).join("")}</optgroup>`);
+  }
+  return groups.join("") || `<option value="">没有可用节点</option>`;
+}
 function isWifiDevice(device) { return /wi.?fi|wireless|wlan/i.test(device.connection || device.type || ""); }
 function deviceIcon(device) {
   const text = `${device.name || ""} ${device.vendor || ""}`.toLowerCase();
@@ -214,14 +262,40 @@ function platformFor(device) {
 }
 function countryFor(node) {
   const text = `${node?.name || ""} ${node?.server || ""}`.toLowerCase();
-  if (/香港|hong.?kong|\\bhk/.test(text)) return ["🇭🇰", "香港"];
-  if (/美国|united.?states|\\bus/.test(text)) return ["🇺🇸", "美国"];
-  if (/日本|japan|\\bjp/.test(text)) return ["🇯🇵", "日本"];
-  if (/新加坡|singapore|\\bsg/.test(text)) return ["🇸🇬", "新加坡"];
-  if (/德国|germany|\\bde/.test(text)) return ["🇩🇪", "德国"];
-  if (/台湾|taiwan|\\btw/.test(text)) return ["🇹🇼", "台湾"];
-  if (/英国|united.?kingdom|\\buk/.test(text)) return ["🇬🇧", "英国"];
-  return ["🌐", "未知"];
+  if (/香港|hong.?kong|\bhk/.test(text)) return ["hk", "香港"];
+  if (/美国|united.?states|\bus/.test(text)) return ["us", "美国"];
+  if (/日本|japan|\bjp/.test(text)) return ["jp", "日本"];
+  if (/新加坡|singapore|\bsg/.test(text)) return ["sg", "新加坡"];
+  if (/德国|germany|\bde/.test(text)) return ["de", "德国"];
+  if (/台湾|taiwan|\btw/.test(text)) return ["tw", "台湾"];
+  if (/英国|united.?kingdom|\buk|\bgb/.test(text)) return ["gb", "英国"];
+  if (/马来西亚|malaysia|\bmy/.test(text)) return ["my", "马来西亚"];
+  if (/韩国|korea|\bkr/.test(text)) return ["kr", "韩国"];
+  if (/荷兰|netherlands|\bnl/.test(text)) return ["nl", "荷兰"];
+  return ["unknown", "未知"];
+}
+function cleanNodeName(name = "") {
+  return String(name)
+    .replace(/^[\u{1F1E6}-\u{1F1FF}]{2}\s*/u, "")
+    .replace(/^(?:US(?=United)|JP(?=Japan)|SG(?=Singapore)|MY(?=Malaysia)|KR(?=Korea)|NL(?=Netherlands)|GB(?=United)|HK(?=Hong))/i, "")
+    .trim() || String(name);
+}
+function flagMarkup(code) {
+  const common = 'viewBox="0 0 24 16" aria-hidden="true"';
+  const flags = {
+    us: `<svg ${common}><rect width="24" height="16" fill="#fff"/><path stroke="#d94b4b" stroke-width="2" d="M0 1h24M0 5h24M0 9h24M0 13h24"/><rect width="10.5" height="8" fill="#3157a4"/><g fill="#fff"><circle cx="2" cy="2" r=".6"/><circle cx="5" cy="2" r=".6"/><circle cx="8" cy="2" r=".6"/><circle cx="3.5" cy="4" r=".6"/><circle cx="6.5" cy="4" r=".6"/><circle cx="2" cy="6" r=".6"/><circle cx="5" cy="6" r=".6"/><circle cx="8" cy="6" r=".6"/></g></svg>`,
+    jp: `<svg ${common}><rect width="24" height="16" fill="#fff"/><circle cx="12" cy="8" r="4.2" fill="#d92f45"/></svg>`,
+    sg: `<svg ${common}><path fill="#e33f4e" d="M0 0h24v8H0z"/><path fill="#fff" d="M0 8h24v8H0z"/><circle cx="6" cy="4" r="2.7" fill="#fff"/><circle cx="7.2" cy="4" r="2.2" fill="#e33f4e"/><circle cx="9.7" cy="2.2" r=".45" fill="#fff"/><circle cx="10.4" cy="4" r=".45" fill="#fff"/><circle cx="9.7" cy="5.8" r=".45" fill="#fff"/></svg>`,
+    hk: `<svg ${common}><rect width="24" height="16" fill="#df3345"/><g fill="#fff" transform="translate(12 8)"><ellipse ry="1.3" rx="4" transform="rotate(-90) translate(0 -2.4)"/><ellipse ry="1.3" rx="4" transform="rotate(-18) translate(0 -2.4)"/><ellipse ry="1.3" rx="4" transform="rotate(54) translate(0 -2.4)"/><ellipse ry="1.3" rx="4" transform="rotate(126) translate(0 -2.4)"/><ellipse ry="1.3" rx="4" transform="rotate(198) translate(0 -2.4)"/></g></svg>`,
+    de: `<svg ${common}><path fill="#202020" d="M0 0h24v5.34H0z"/><path fill="#d43b3b" d="M0 5.33h24v5.34H0z"/><path fill="#f3c743" d="M0 10.66h24V16H0z"/></svg>`,
+    tw: `<svg ${common}><rect width="24" height="16" fill="#d73745"/><rect width="12" height="8.5" fill="#234e9b"/><circle cx="6" cy="4.25" r="2.2" fill="#fff"/></svg>`,
+    gb: `<svg ${common}><rect width="24" height="16" fill="#264b91"/><path stroke="#fff" stroke-width="3.5" d="m0 0 24 16M24 0 0 16"/><path stroke="#d83f4e" stroke-width="1.5" d="m0 0 24 16M24 0 0 16"/><path stroke="#fff" stroke-width="5" d="M12 0v16M0 8h24"/><path stroke="#d83f4e" stroke-width="2.8" d="M12 0v16M0 8h24"/></svg>`,
+    my: `<svg ${common}><rect width="24" height="16" fill="#fff"/><path stroke="#d8454e" stroke-width="2" d="M0 1h24M0 5h24M0 9h24M0 13h24"/><rect width="12" height="8" fill="#254e9a"/><circle cx="5.5" cy="4" r="2.6" fill="#f6ce45"/><circle cx="6.5" cy="4" r="2.2" fill="#254e9a"/></svg>`,
+    kr: `<svg ${common}><rect width="24" height="16" fill="#fff"/><path fill="#d9434c" d="M12 4a4 4 0 0 1 0 8 2 2 0 0 0 0-4 2 2 0 0 1 0-4Z"/><path fill="#2c5aa0" d="M12 12a4 4 0 0 1 0-8 2 2 0 0 0 0 4 2 2 0 0 1 0 4Z"/></svg>`,
+    nl: `<svg ${common}><path fill="#c9454c" d="M0 0h24v5.34H0z"/><path fill="#fff" d="M0 5.33h24v5.34H0z"/><path fill="#315895" d="M0 10.66h24V16H0z"/></svg>`,
+    unknown: `<svg ${common}><rect width="24" height="16" fill="#f1f4f8"/><circle cx="12" cy="8" r="5" fill="none" stroke="#8090a9" stroke-width="1.2"/><path d="M7 8h10M12 3a8 8 0 0 1 0 10M12 3a8 8 0 0 0 0 10" fill="none" stroke="#8090a9" stroke-width="1"/></svg>`,
+  };
+  return `<span class="country-flag flag-${escapeHtml(code)}">${flags[code] || flags.unknown}</span>`;
 }
 function egressFor(device) {
   if (device.policy === "direct") return "本地直连";
@@ -239,6 +313,9 @@ function deviceStatus(device) {
   return device.online ? ["online", "在线"] : ["offline", "离线"];
 }
 function latencyFor(device) { return nodeFor(device)?.latency_ms ?? null; }
+function egressIpFor(device) {
+  return state.egressByDevice.get(device.mac) || device.egress_ip || "";
+}
 function signalMarkup(latency) {
   if (latency == null) return "";
   return `<span class="signal-bars"><i></i><i></i><i></i></span>`;
@@ -276,7 +353,7 @@ function deviceRow(device, dashboard = false) {
   const node = nodeFor(device);
   const [statusClass, statusLabel] = deviceStatus(device);
   const latency = latencyFor(device);
-  const [flag] = countryFor(node);
+  const [countryCode] = countryFor(node);
   const connection = isWifiDevice(device) ? "Wi‑Fi 5GHz" : "LAN";
   const protocol = device.policy === "direct" ? "DIRECT" : node?.protocol || (device.policy === "block" ? "Blocked" : "系统策略");
   if (dashboard) return `
@@ -284,10 +361,10 @@ function deviceRow(device, dashboard = false) {
       <td><div class="device-cell"><span class="device-avatar"><span class="icon" data-icon="${deviceIcon(device)}"></span></span><div><strong>${escapeHtml(device.name || "未知设备")}</strong><small>${escapeHtml(platformFor(device))}</small></div></div></td>
       <td>${escapeHtml(device.ip || "—")}</td>
       <td><div class="connection-cell ${isWifiDevice(device) ? "wifi" : "lan"}"><span class="icon" data-icon="${isWifiDevice(device) ? "wifi" : "network"}"></span><span>${connection}</span></div></td>
-      <td><div class="node-cell"><span class="flag">${device.policy === "direct" ? "🌐" : device.policy === "block" ? "⛔" : flag}</span><div><strong>${escapeHtml(egressFor(device))}</strong><small>${escapeHtml(protocol)}</small></div></div></td>
+      <td><div class="node-cell">${device.policy === "direct" ? flagMarkup("unknown") : device.policy === "block" ? '<span class="policy-stop">!</span>' : flagMarkup(countryCode)}<div><strong>${escapeHtml(egressFor(device))}</strong><small>${escapeHtml(protocol)}</small></div></div></td>
       <td><span class="latency ${latency > 80 ? "warn" : ""}">${latency == null ? "—" : `${latency} ms`}${signalMarkup(latency)}</span></td>
       <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
-      <td><div class="table-actions"><button class="row-action edit-device" data-mac="${escapeHtml(device.mac)}"><span class="icon" data-icon="refresh"></span>更换节点</button><button class="row-action egress-check" data-mac="${escapeHtml(device.mac)}"><span class="icon" data-icon="target"></span>出口检测</button><button class="more-button">⋮</button></div></td>
+      <td><div class="table-actions"><button class="row-action edit-device" data-mac="${escapeHtml(device.mac)}"><span class="icon" data-icon="refresh"></span>更换节点</button><button class="row-action egress-check" data-mac="${escapeHtml(device.mac)}"><span class="icon" data-icon="target"></span>出口检测</button><button class="more-button edit-device" data-mac="${escapeHtml(device.mac)}" title="打开设备详情">⋮</button></div></td>
     </tr>`;
   return `
     <tr class="${state.selectedDevices.has(device.mac) ? "is-selected" : ""}">
@@ -295,7 +372,8 @@ function deviceRow(device, dashboard = false) {
       <td><div class="device-cell"><span class="device-avatar"><span class="icon" data-icon="${deviceIcon(device)}"></span></span><div><strong>${escapeHtml(device.name || "未知设备")}</strong><small>${escapeHtml(platformFor(device))}</small></div></div></td>
       <td><div class="connection-cell ${isWifiDevice(device) ? "wifi" : "lan"}"><span class="icon" data-icon="${isWifiDevice(device) ? "wifi" : "network"}"></span><span>${connection}</span></div></td>
       <td>${escapeHtml(device.ip || "—")}</td>
-      <td><div class="node-cell"><span class="flag">${device.policy === "direct" ? "🌐" : device.policy === "block" ? "⛔" : flag}</span><div><strong>${escapeHtml(egressFor(device))}</strong><small>${escapeHtml(node?.source_type === "subscription" ? "订阅节点" : node ? "手动节点" : policyLabel(device.policy))}</small></div></div></td>
+      <td><div class="node-cell">${device.policy === "direct" ? flagMarkup("unknown") : device.policy === "block" ? '<span class="policy-stop">!</span>' : flagMarkup(countryCode)}<div><strong>${escapeHtml(egressFor(device))}</strong><small>${escapeHtml(node?.source_type === "subscription" ? "订阅节点" : node ? "手动节点" : policyLabel(device.policy))}</small></div></div></td>
+      <td><span class="egress-ip ${egressIpFor(device) === "检测失败" ? "is-error" : ""}">${escapeHtml(egressIpFor(device) || (device.policy === "block" ? "已阻断" : "待检测"))}</span></td>
       <td>${escapeHtml(protocol)}</td>
       <td><span class="latency ${latency > 80 ? "warn" : ""}">${latency == null ? "—" : `${latency} ms`}${signalMarkup(latency)}</span></td>
       <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
@@ -330,7 +408,7 @@ function filteredDevices() {
 
 function renderDevices() {
   const devices = filteredDevices();
-  $("#device-table-body").innerHTML = devices.length ? devices.map((device) => deviceRow(device)).join("") : `<tr><td colspan="9"><div class="empty-state">没有匹配的设备</div></td></tr>`;
+  $("#device-table-body").innerHTML = devices.length ? devices.map((device) => deviceRow(device)).join("") : `<tr><td colspan="10"><div class="empty-state">没有匹配的设备</div></td></tr>`;
   $("#device-count").textContent = `共 ${devices.length} 台设备`;
   $("#selected-device-count").textContent = `已选择 ${state.selectedDevices.size} 项`;
   $("#select-all-devices").checked = devices.length > 0 && devices.every((device) => state.selectedDevices.has(device.mac));
@@ -364,25 +442,38 @@ function renderNodeMetrics() {
 function filteredNodes() {
   const query = ($("#node-search")?.value || "").trim().toLowerCase();
   const protocol = $("#node-protocol-filter")?.value || "all";
+  const subscriptionOrder = new Map(state.subscriptions.map((subscription, index) => [subscription.id, index]));
   return state.nodes.filter((node) => {
     const sourceMatch = state.nodeSource === "all" || node.source_type === state.nodeSource;
+    const subscriptionMatch = state.nodeSubscription === "all" || node.source_id === state.nodeSubscription;
     const healthMatch = state.nodeHealth === "all" || (state.nodeHealth === "available" ? node.status !== "error" : node.status === "error");
     const protocolMatch = protocol === "all" || node.protocol === protocol;
     const queryMatch = [node.name, node.server, node.protocol].filter(Boolean).some((value) => String(value).toLowerCase().includes(query));
-    return sourceMatch && healthMatch && protocolMatch && queryMatch;
+    return sourceMatch && subscriptionMatch && healthMatch && protocolMatch && queryMatch;
+  }).sort((left, right) => {
+    const leftGroup = left.source_type === "subscription" ? (subscriptionOrder.get(left.source_id) ?? 9998) : -1;
+    const rightGroup = right.source_type === "subscription" ? (subscriptionOrder.get(right.source_id) ?? 9998) : -1;
+    return leftGroup - rightGroup || String(left.name || "").localeCompare(String(right.name || ""), "zh-CN");
   });
 }
 
 function renderNodes() {
   renderNodeMetrics();
+  const subscriptionFilter = $("#node-subscription-filter");
+  if (subscriptionFilter) {
+    subscriptionFilter.innerHTML = `<option value="all">全部订阅</option>${state.subscriptions.map((subscription) =>
+      `<option value="${escapeHtml(subscription.id)}">${escapeHtml(subscription.name)}</option>`).join("")}`;
+    subscriptionFilter.value = state.nodeSubscription;
+    subscriptionFilter.disabled = state.nodeSource === "manual";
+  }
   const nodes = filteredNodes();
   $("#node-table-body").innerHTML = nodes.length ? nodes.map((node) => {
-    const [flag, country] = countryFor(node);
+    const [countryCode, country] = countryFor(node);
     const latency = node.latency_ms;
     return `<tr>
-      <td><div class="node-name"><strong>${escapeHtml(node.name)}</strong><small>${escapeHtml(node.server || "服务器地址已保护")}</small></div></td>
-      <td><span class="source-label">${node.source_type === "subscription" ? "订阅" : "手动"}</span></td>
-      <td><span class="flag">${flag}</span> ${country}</td>
+      <td><div class="node-name"><strong>${escapeHtml(cleanNodeName(node.name))}</strong><small>${escapeHtml(node.server || "服务器地址已保护")}</small></div></td>
+      <td><span class="source-label">${node.source_type === "subscription" ? escapeHtml(subscriptionForNode(node)?.name || "其他订阅") : "手动节点"}</span></td>
+      <td><div class="country-cell">${flagMarkup(countryCode)}<span>${country}</span></div></td>
       <td><span class="protocol-pill">${escapeHtml(node.protocol)}</span></td>
       <td><span class="latency ${latency > 80 ? "warn" : ""}">${latency == null ? "—" : `${latency} ms`}</span></td>
       <td><span class="status-badge ${node.status === "error" ? "blocked" : "online"}">${node.status === "error" ? "异常" : "可用"}</span></td>
@@ -399,14 +490,16 @@ function renderNodes() {
 
 function renderSubscriptions() {
   $("#subscription-grid").innerHTML = state.subscriptions.length ? state.subscriptions.map((subscription) => `
-    <article class="panel subscription-card" title="${escapeHtml(subscription.error || "")}">
-      <div class="subscription-card-head"><span class="source-pill">${escapeHtml((subscription.format || "自动识别").toUpperCase())}</span><button class="more-button delete-subscription" data-id="${escapeHtml(subscription.id)}">⋮</button></div>
+    <article class="panel subscription-card ${Number(subscription.skipped_count || 0) > 0 ? "has-warning" : ""}" title="${escapeHtml(subscription.error || subscription.warning || "")}">
+      <div class="subscription-card-head"><span class="source-pill">${escapeHtml((subscription.format || "自动识别").toUpperCase())}</span><button class="more-button manage-subscription" data-id="${escapeHtml(subscription.id)}" title="订阅信息与设置">⋮</button></div>
       <h3>${escapeHtml(subscription.name)}</h3>
       <p>${Number(subscription.node_count || 0)} 个节点 · 最后更新：${escapeHtml(formatTime(subscription.last_update))}</p>
+      ${Number(subscription.skipped_count || 0) > 0 ? `<p class="subscription-warning">已跳过 ${Number(subscription.skipped_count)} 个不兼容节点，其余节点已正常导入</p>` : ""}
+      ${subscription.status === "error" && subscription.error ? `<p class="subscription-error">${escapeHtml(subscription.error)}</p>` : ""}
       <div class="subscription-foot"><span class="status-badge ${subscription.status === "ok" ? "online" : "offline"}">${subscription.status === "ok" ? "正常" : subscription.status === "error" ? "更新失败" : "等待更新"}</span><button class="button button-soft update-subscription" data-id="${escapeHtml(subscription.id)}">立即更新</button></div>
     </article>`).join("") : `<article class="panel empty-state">还没有订阅，可添加 Clash YAML、Base64、分享链接或 sing-box JSON 订阅。</article>`;
   $$(".update-subscription").forEach((button) => button.addEventListener("click", () => updateSubscription(button)));
-  $$(".delete-subscription").forEach((button) => button.addEventListener("click", () => deleteSubscription(button.dataset.id)));
+  $$(".manage-subscription").forEach((button) => button.addEventListener("click", () => openSubscriptionDetails(button.dataset.id)));
 }
 
 function renderWifi() {
@@ -470,7 +563,7 @@ function renderPolicies() {
     panel.className = "panel policy-settings-panel";
     $(".policy-grid", page).after(panel);
   }
-  const options = state.nodes.map((node) => `<option value="${escapeHtml(node.id)}" ${state.policy.default_node_id === node.id ? "selected" : ""}>${escapeHtml(node.name)} · ${escapeHtml(node.protocol)}</option>`).join("");
+  const options = groupedNodeOptions(state.policy.default_node_id);
   panel.innerHTML = `
     <div class="section-title-row"><div><h2>系统默认出口</h2><p>未单独设置的设备使用此策略</p></div><button form="policy-settings-form" class="button button-primary" type="submit">保存策略</button></div>
     <form id="policy-settings-form" class="settings-form-row">
@@ -484,13 +577,13 @@ function renderPolicies() {
 
 function renderSystem() {
   const healthy = Boolean(state.status.singbox_running);
-  $("#system-version").textContent = state.status.version || "0.2.1-alpha";
+  $("#system-version").textContent = state.status.version || "0.2.2-alpha";
   $("#system-model").textContent = state.status.model || "x86-64";
   $("#system-kernel").textContent = state.status.kernel || "—";
   $("#system-core").textContent = healthy ? "运行正常" : "未运行";
   $("#sidebar-core-text").textContent = healthy ? "系统运行正常" : "代理核心异常";
   $("#sidebar-uptime").textContent = formatUptime(state.status.uptime);
-  $("#sidebar-version").textContent = state.status.version || "0.2.1-alpha";
+  $("#sidebar-version").textContent = state.status.version || "0.2.2-alpha";
   $("#sidebar-kernel").textContent = state.status.kernel || "—";
   ["#global-health", "#system-health-pill"].forEach((selector) => {
     const pill = $(selector);
@@ -553,11 +646,34 @@ function openDeviceDrawer(mac) {
   const policy = device.policy || "system_default";
   const radio = $(`#device-policy-form input[value="${policy}"]`);
   if (radio) radio.checked = true;
-  const options = state.nodes.length ? state.nodes.map((node) => `<option value="${escapeHtml(node.id)}" ${device.node_id === node.id ? "selected" : ""}>${escapeHtml(node.name)} · ${escapeHtml(node.protocol)}</option>`).join("") : `<option value="">没有可用节点</option>`;
-  $("#drawer-node-select").innerHTML = options;
-  $("#drawer-backup-select").innerHTML = `<option value="">未设置备用节点</option>${state.nodes.map((node) => `<option value="${escapeHtml(node.id)}" ${device.backup_node_id === node.id ? "selected" : ""}>${escapeHtml(node.name)} · ${escapeHtml(node.protocol)}</option>`).join("")}`;
+  state.drawerNodeSource = device.auto_source || "all";
+  $("#drawer-node-select").innerHTML = groupedNodeOptions(device.node_id, { source: state.drawerNodeSource });
+  $("#drawer-backup-select").innerHTML = groupedNodeOptions(device.backup_node_id, { includeEmpty: true, source: state.drawerNodeSource });
   $("#drawer-failure-mode").value = device.failure_mode || "block";
-  $$("#device-drawer .tab-group button").forEach((button) => button.classList.toggle("is-active", button.dataset.value === (device.auto_source || "all")));
+  const assignedNode = state.nodes.find((node) => node.id === device.node_id);
+  const policyLabels = {
+    system_default: "系统默认",
+    direct: "本地直连",
+    fixed_node: "指定节点",
+    auto_node: "自动节点组",
+    block: "禁止联网",
+  };
+  const failureLabels = { block: "保持断网", backup: "切换备用节点", direct: "切换直连" };
+  $("#drawer-info-connection").textContent = isWifiDevice(device) ? (device.band || "Wi‑Fi") : "有线 LAN";
+  $("#drawer-info-status").textContent = device.online === false ? "当前离线" : "连接正常";
+  $("#drawer-info-ip").textContent = device.ip || "—";
+  $("#drawer-info-mac").textContent = device.mac || "—";
+  $("#drawer-info-platform").textContent = platformFor(device);
+  $("#drawer-info-radio").textContent = isWifiDevice(device)
+    ? [device.signal != null ? `${device.signal} dBm` : "", device.band || "Wi‑Fi"].filter(Boolean).join(" · ")
+    : "千兆 / 以太网";
+  $("#drawer-info-policy").textContent = policyLabels[policy] || policy;
+  $("#drawer-info-node").textContent = assignedNode ? `${assignedNode.name} · ${assignedNode.protocol}` : (policy === "direct" ? "本地宽带" : "未分配");
+  $("#drawer-info-failure").textContent = failureLabels[device.failure_mode || "block"] || "保持断网";
+  $("#drawer-egress-ip").textContent = "尚未检测";
+  $$("#device-drawer [data-drawer-tab]").forEach((button) => button.classList.toggle("is-active", button.dataset.drawerTab === "settings"));
+  $$("#device-drawer [data-drawer-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.drawerPanel !== "settings"));
+  $$("#device-drawer .tab-group button").forEach((button) => button.classList.toggle("is-active", button.dataset.value === state.drawerNodeSource));
   syncDrawerNodeState();
   $("#device-drawer").classList.remove("is-hidden");
   hydrateIcons($("#device-drawer"));
@@ -598,7 +714,8 @@ async function saveDevicePolicy(event) {
     });
     closeLayers();
     await loadAll({ quiet: true });
-    showToast("设备出口已更新");
+    showToast("设备出口已更新，正在检测公网 IP");
+    await checkEgress(device.mac);
   } catch (error) { showToast(error.message, true); }
   finally { button.disabled = false; button.textContent = "保存设置"; }
 }
@@ -705,14 +822,27 @@ async function addSubscription(event) {
   const button = event.submitter;
   try {
     button.disabled = true;
-    await api("subscription_add", { name: $("#subscription-name").value.trim(), url: $("#subscription-url").value.trim() });
-    event.target.reset(); closeLayers(); await loadAll({ quiet: true }); showToast("订阅已保存，请点击立即更新");
+    button.textContent = "正在导入…";
+    const created = await api("subscription_add", { name: $("#subscription-name").value.trim(), url: $("#subscription-url").value.trim() });
+    const imported = await api("subscription_update", { id: created.id });
+    event.target.reset();
+    closeLayers();
+    await loadAll({ quiet: true });
+    showToast(Number(imported.skipped_count || 0) > 0
+      ? `已导入 ${Number(imported.node_count || 0)} 个节点，跳过 ${Number(imported.skipped_count)} 个不兼容节点`
+      : `订阅已导入，共 ${Number(imported.node_count || 0)} 个节点`);
   } catch (error) { showToast(error.message, true); }
-  finally { button.disabled = false; }
+  finally { button.disabled = false; button.textContent = "保存并导入"; }
 }
 async function updateSubscription(button) {
   button.disabled = true; button.textContent = "更新中…";
-  try { await api("subscription_update", { id: button.dataset.id }); await loadAll({ quiet: true }); showToast("订阅已更新"); }
+  try {
+    const imported = await api("subscription_update", { id: button.dataset.id });
+    await loadAll({ quiet: true });
+    showToast(Number(imported.skipped_count || 0) > 0
+      ? `已更新 ${Number(imported.node_count || 0)} 个节点，跳过 ${Number(imported.skipped_count)} 个不兼容节点`
+      : `订阅已更新，共 ${Number(imported.node_count || 0)} 个节点`);
+  }
   catch (error) { showToast(error.message, true); }
   finally { button.disabled = false; button.textContent = "立即更新"; }
 }
@@ -721,9 +851,64 @@ async function deleteSubscription(id) {
   if (!window.confirm("删除订阅会同时移除该订阅的节点，相关设备将按失效策略处理。是否继续？")) return;
   try {
     await api("subscription_delete", { id });
+    if (state.editingSubscription === id) state.editingSubscription = "";
+    closeLayers();
     await loadAll({ quiet: true });
     showToast("订阅已删除");
   } catch (error) { showToast(error.message, true); }
+}
+
+async function openSubscriptionDetails(id) {
+  state.editingSubscription = id;
+  const modal = $("#subscription-detail-modal");
+  modal.classList.remove("is-hidden");
+  $("#subscription-detail-name").value = "正在读取…";
+  $("#subscription-detail-url").value = "";
+  $("#subscription-detail-message").textContent = "";
+  try {
+    const subscription = await api("subscription_get", { id });
+    if (state.editingSubscription !== id) return;
+    $("#subscription-detail-id").value = subscription.id || id;
+    $("#subscription-detail-name").value = subscription.name || "";
+    $("#subscription-detail-url").value = subscription.url || "";
+    $("#subscription-detail-format").textContent = (subscription.format || "自动识别").toUpperCase();
+    $("#subscription-detail-count").textContent = `${Number(subscription.node_count || 0)} 个`;
+    $("#subscription-detail-skipped").textContent = `${Number(subscription.skipped_count || 0)} 个`;
+    $("#subscription-detail-updated").textContent = formatTime(subscription.last_update);
+    $("#subscription-detail-message").textContent =
+      subscription.error || subscription.warning || "订阅更新后仍会保留该订阅 ID 与设备节点绑定。";
+  } catch (error) {
+    closeLayers();
+    showToast(`订阅信息读取失败：${error.message}`, true);
+  }
+}
+
+async function saveSubscriptionDetails(event) {
+  event.preventDefault();
+  const id = $("#subscription-detail-id").value || state.editingSubscription;
+  const button = event.submitter;
+  button.disabled = true;
+  button.textContent = "保存并更新中…";
+  try {
+    await api("subscription_save", {
+      id,
+      name: $("#subscription-detail-name").value.trim(),
+      url: $("#subscription-detail-url").value.trim(),
+    });
+    const imported = await api("subscription_update", { id });
+    state.editingSubscription = "";
+    closeLayers();
+    await loadAll({ quiet: true });
+    showToast(Number(imported.skipped_count || 0) > 0
+      ? `订阅已保存，导入 ${Number(imported.node_count || 0)} 个节点，跳过 ${Number(imported.skipped_count)} 个`
+      : `订阅已保存并更新，共 ${Number(imported.node_count || 0)} 个节点`);
+  } catch (error) {
+    await loadAll({ quiet: true });
+    showToast(`订阅保存或更新失败：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "保存并更新";
+  }
 }
 
 async function toggleWifi(event) {
@@ -773,17 +958,30 @@ async function disconnectWifiClient(mac) {
   } catch (error) { showToast(error.message, true); }
 }
 
-async function checkEgress(mac) {
+async function checkEgress(mac, { quiet = false } = {}) {
   const device = state.devices.find((item) => item.mac === mac);
   if (!device) return;
   try {
     const result = await api("egress_check", { device_mac: mac });
     if (result.blocked) {
-      showToast(`${device.name || "设备"} 当前策略为断网保护，没有公网出口`);
-      return;
+      state.egressByDevice.set(mac, "已阻断");
+      if (state.selectedDevice?.mac === mac) $("#drawer-egress-ip").textContent = "已启用断网保护";
+      renderDevices();
+      if (!quiet) showToast(`${device.name || "设备"} 当前策略为断网保护，没有公网出口`);
+      return result;
     }
-    showToast(result.ip ? `${device.name || "设备"} 出口 IP：${result.ip}` : "出口检测未获得公网 IP", !result.ip);
-  } catch (error) { showToast(`出口检测失败：${error.message}`, true); }
+    state.egressByDevice.set(mac, result.ip || "检测失败");
+    if (state.selectedDevice?.mac === mac) $("#drawer-egress-ip").textContent = result.ip || "检测失败";
+    renderDevices();
+    if (!quiet) showToast(result.ip ? `${device.name || "设备"} 出口 IP：${result.ip}` : "出口检测未获得公网 IP", !result.ip);
+    return result;
+  } catch (error) {
+    state.egressByDevice.set(mac, "检测失败");
+    if (state.selectedDevice?.mac === mac) $("#drawer-egress-ip").textContent = "检测失败";
+    renderDevices();
+    if (!quiet) showToast(`出口检测失败：${error.message}`, true);
+    return null;
+  }
 }
 
 async function savePolicySettings(event) {
@@ -970,8 +1168,17 @@ function bindEvents() {
   $("#batch-egress-check").addEventListener("click", batchEgressCheck);
   $("#node-search").addEventListener("input", renderNodes);
   $("#node-protocol-filter").addEventListener("change", renderNodes);
+  $("#node-subscription-filter").addEventListener("change", (event) => {
+    state.nodeSubscription = event.target.value;
+    if (state.nodeSubscription !== "all" && state.nodeSource === "manual") {
+      state.nodeSource = "subscription";
+      $$("#node-source-tabs button").forEach((item) => item.classList.toggle("is-active", item.dataset.value === "subscription"));
+    }
+    renderNodes();
+  });
   $$("#node-source-tabs button").forEach((button) => button.addEventListener("click", () => {
     state.nodeSource = button.dataset.value;
+    if (state.nodeSource === "manual") state.nodeSubscription = "all";
     $$("#node-source-tabs button").forEach((item) => item.classList.toggle("is-active", item === button));
     renderNodes();
   }));
@@ -986,16 +1193,40 @@ function bindEvents() {
   $$(".close-layer").forEach((button) => button.addEventListener("click", closeLayers));
   $$(".drawer-backdrop, .modal-backdrop").forEach((layer) => layer.addEventListener("click", (event) => { if (event.target === layer) closeLayers(); }));
   $("#device-policy-form").addEventListener("change", syncDrawerNodeState);
+  $$("#device-drawer [data-drawer-tab]").forEach((button) => button.addEventListener("click", () => {
+    $$("#device-drawer [data-drawer-tab]").forEach((item) => item.classList.toggle("is-active", item === button));
+    $$("#device-drawer [data-drawer-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.drawerPanel !== button.dataset.drawerTab));
+  }));
+  $("#drawer-egress-check").addEventListener("click", async (event) => {
+    const device = state.selectedDevice;
+    if (!device) return;
+    const button = event.currentTarget;
+    button.disabled = true;
+    try { await checkEgress(device.mac); }
+    catch {}
+    finally { button.disabled = false; }
+  });
   $$("#device-drawer .tab-group button").forEach((button, index) => {
     button.dataset.value = ["all", "subscription", "manual"][index];
     button.addEventListener("click", () => {
+      const currentNode = $("#drawer-node-select").value;
+      const currentBackup = $("#drawer-backup-select").value;
+      state.drawerNodeSource = button.dataset.value;
       $$("#device-drawer .tab-group button").forEach((item) => item.classList.toggle("is-active", item === button));
+      $("#drawer-node-select").innerHTML = groupedNodeOptions(currentNode, { source: state.drawerNodeSource });
+      $("#drawer-backup-select").innerHTML = groupedNodeOptions(currentBackup, { includeEmpty: true, source: state.drawerNodeSource });
+      syncDrawerNodeState();
     });
   });
   $("#device-policy-form").addEventListener("submit", saveDevicePolicy);
   $("#node-protocol").addEventListener("change", syncNodeProtocolFields);
   $("#node-form").addEventListener("submit", addNode);
   $("#subscription-form").addEventListener("submit", addSubscription);
+  $("#subscription-detail-form").addEventListener("submit", saveSubscriptionDetails);
+  $("#subscription-detail-delete").addEventListener("click", () => {
+    const id = $("#subscription-detail-id").value || state.editingSubscription;
+    if (id) deleteSubscription(id);
+  });
   $("#apply-ports").addEventListener("click", applyPorts);
   $("#confirm-ports").addEventListener("click", confirmPorts);
   $("#apply-config").addEventListener("click", applyConfig);

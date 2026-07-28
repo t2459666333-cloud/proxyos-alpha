@@ -105,6 +105,21 @@ proxies:
   assert.equal(result.nodes[0].outbound.transport.type, "ws");
   assert.equal(result.nodes[0].outbound.tls.server_name, "hk.example.com");
   assert.equal(result.nodes[1].outbound.type, "hysteria2");
+  assert.equal(result.nodes[1].outbound.tls.enabled, true);
+  assert.equal(result.nodes[1].outbound.tls.server_name, "sg.example.com");
+});
+
+test("enables mandatory TLS for standard secure proxy links", () => {
+  const result = parsePayload("mandatory-tls", [
+    "trojan://secret@tr.example.com:443#Trojan",
+    "tuic://uuid:password@tuic.example.com:443#TUIC",
+    "anytls://secret@any.example.com:443#AnyTLS",
+  ].join("\n"));
+  assert.equal(result.nodes.length, 3);
+  for (const node of result.nodes) {
+    assert.equal(node.outbound.tls.enabled, true);
+    assert.equal(node.outbound.tls.server_name, node.outbound.server);
+  }
 });
 
 test("subscription node identity ignores display-name changes", () => {
@@ -115,4 +130,28 @@ test("subscription node identity ignores display-name changes", () => {
     outbounds: [{ type: "socks", tag: "New name", server: "node.example.com", server_port: 1080 }],
   }));
   assert.equal(first.nodes[0].id, second.nodes[0].id);
+});
+
+test("keeps valid links when a mixed subscription contains unsupported and metadata entries", () => {
+  const result = parsePayload("mixed-links", [
+    "ssr://unsupported-payload",
+    "vless://metadata@info.example.com:443?security=tls#剩余流量：100 GB",
+    "vless://valid-id@valid.example.com:443?security=tls#Valid node",
+  ].join("\n"));
+  assert.equal(result.nodes.length, 1);
+  assert.equal(result.nodes[0].name, "Valid node");
+  assert.equal(result.skipped.length, 2);
+  assert.match(result.skipped[0].error, /unsupported/i);
+  assert.match(result.skipped[1].error, /metadata/i);
+});
+
+test("parses JSON wrappers containing share-link arrays", () => {
+  const result = parsePayload("json-links", JSON.stringify({
+    data: [
+      "trojan://secret@one.example.com:443#One",
+      "socks5://user:pass@two.example.com:1080#Two",
+    ],
+  }));
+  assert.equal(result.format, "json-links");
+  assert.deepEqual(result.nodes.map((node) => node.outbound.type), ["trojan", "socks"]);
 });

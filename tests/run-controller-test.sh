@@ -76,6 +76,19 @@ done
 jq -e 'all(.[]; has("backup_node_id") and has("failure_mode") and has("auto_source"))' \
   "${STATE_DIR}/devices.json" >/dev/null
 
+# A device policy change must be written transactionally and regenerated into
+# the effective sing-box source-IP route.
+PROXYOS_STATE_DIR="${STATE_DIR}" \
+  "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" device-bind \
+  '{"mac":"AA:BB:CC:DD:EE:03","ip":"192.168.10.103","name":"Direct test","policy":"direct","node_id":"","backup_node_id":"","failure_mode":"block","auto_source":"all"}' |
+  jq -e '.ok == true' >/dev/null
+jq -e '
+  any(.[]; .mac == "AA:BB:CC:DD:EE:03" and .policy == "direct")
+' "${STATE_DIR}/devices.json" >/dev/null
+jq -e '
+  any(.route.rules[]; .source_ip_cidr == ["192.168.10.103/32"] and .outbound == "direct")
+' "${STATE_DIR}/sing-box.json" >/dev/null
+
 # Exercise the complete controller subscription path, not only the parser.
 subscription_fixture="${STATE_DIR}/subscription.yaml"
 cat > "$subscription_fixture" <<'EOF'
@@ -106,5 +119,32 @@ PROXYOS_STATE_DIR="${STATE_DIR}" \
 jq -e --arg id "$subscription_id" \
   'any(.[]; .source_id == $id and .outbound.type == "vless")' \
   "${STATE_DIR}/nodes.json" >/dev/null
+PROXYOS_STATE_DIR="${STATE_DIR}" \
+  "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" subscription-save \
+  "$(jq -nc --arg id "$subscription_id" \
+    '{id:$id,name:"Renamed controller subscription",url:"https://example.com/proxyos-test"}')" |
+  jq -e '.ok == true' >/dev/null
+PROXYOS_STATE_DIR="${STATE_DIR}" \
+  "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" subscription-get \
+  "$(jq -nc --arg id "$subscription_id" '{id:$id}')" |
+  jq -e '.name == "Renamed controller subscription" and .url == "https://example.com/proxyos-test"' >/dev/null
+
+if [[ "${PROXYOS_SKIP_CONFIG_CHECK:-0}" != "1" ]]; then
+  mixed_fixture="${PROJECT_DIR}/tests/fixtures/mixed-subscription.json"
+  mixed_url="file://${mixed_fixture}"
+  mixed_add="$(
+    PROXYOS_STATE_DIR="${STATE_DIR}" \
+      "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" subscription-add \
+      "$(jq -nc --arg url "$mixed_url" '{name:"Mixed subscription",url:$url}')"
+  )"
+  mixed_id="$(printf '%s' "$mixed_add" | jq -r '.id')"
+  PROXYOS_STATE_DIR="${STATE_DIR}" \
+    "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" subscription-update \
+    "$(jq -nc --arg id "$mixed_id" '{id:$id}')" |
+    jq -e '.ok == true and .node_count == 1 and .skipped_count == 1 and .detected_count == 2' >/dev/null
+  jq -e --arg id "$mixed_id" \
+    'any(.[]; .id == $id and .status == "ok" and .node_count == 1 and .skipped_count == 1)' \
+    "${STATE_DIR}/subscriptions.json" >/dev/null
+fi
 
 echo "On-device controller generation test passed."

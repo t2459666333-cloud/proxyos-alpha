@@ -7,7 +7,7 @@ const port = Number(process.env.PORT || 4173);
 
 const mock = {
   status: {
-    version: "0.2.1-alpha",
+    version: "0.2.2-alpha",
     hostname: "ProxyOS",
     model: "Intel N100 · x86-64",
     kernel: "6.12.74",
@@ -32,10 +32,10 @@ const mock = {
   ],
   nodes: [
     { id: "hk01", name: "香港 01", protocol: "vless", source_type: "subscription", source_id: "sub01", server: "hk.example.com", server_port: 443, enabled: true },
-    { id: "us02", name: "美国住宅 02", protocol: "trojan", source_type: "subscription", source_id: "sub01", server: "us.example.com", server_port: 443, enabled: true },
+    { id: "us02", name: "美国住宅 02", protocol: "trojan", source_type: "subscription", source_id: "sub02", server: "us.example.com", server_port: 443, enabled: true },
     { id: "jp01", name: "日本手动线路", protocol: "socks", source_type: "manual", source_id: "", server: "jp.example.com", server_port: 1080, enabled: true },
     { id: "sg01", name: "新加坡 01", protocol: "hysteria2", source_type: "subscription", source_id: "sub01", server: "sg.example.com", server_port: 8443, enabled: true },
-    { id: "de01", name: "德国 01", protocol: "vmess", source_type: "subscription", source_id: "sub01", server: "de.example.com", server_port: 443, enabled: true },
+    { id: "de01", name: "德国 01", protocol: "vmess", source_type: "subscription", source_id: "sub02", server: "de.example.com", server_port: 443, enabled: true },
     { id: "uk01", name: "英国 01", protocol: "shadowsocks", source_type: "manual", source_id: "", server: "uk.example.com", server_port: 8388, enabled: true },
   ],
   wifi_status: { available: true, enabled: true, phy: "phy0", driver: "mt7921e", reason: "" },
@@ -48,7 +48,7 @@ const mock = {
       { radio: "radio1", band: "5g", ssid: "ProxyOS-5G", encryption: "sae-mixed", channel: "36", htmode: "HE80", country: "CN", enabled: true },
     ],
   },
-  policy_settings: { default_policy: "direct", default_node_id: "", health_interval: 300, fail_closed: true },
+  policy_settings: { default_policy: "direct", default_node_id: "", health_interval: 300, health_batch_size: 8, fail_closed: true },
   ports: [
     { name: "eth0", mac: "00:11:22:33:44:01", state: "up", speed_mbps: 2500, driver: "igc", role: "wan" },
     { name: "eth1", mac: "00:11:22:33:44:02", state: "up", speed_mbps: 2500, driver: "igc", role: "lan" },
@@ -56,7 +56,8 @@ const mock = {
     { name: "eth3", mac: "00:11:22:33:44:04", state: "down", speed_mbps: 0, driver: "igc", role: "unused" },
   ],
   subscriptions: [
-    { id: "sub01", name: "主线路订阅", format: "clash-yaml", node_count: 5, last_update: Math.floor(Date.now() / 1000) - 1840, status: "ok", url_configured: true },
+    { id: "sub01", name: "主线路订阅", url: "https://example.com/main", format: "clash-yaml", node_count: 3, skipped_count: 0, last_update: Math.floor(Date.now() / 1000) - 1840, status: "ok", url_configured: true },
+    { id: "sub02", name: "备用线路订阅", url: "https://example.com/backup", format: "base64", node_count: 2, skipped_count: 1, warning: "已跳过 1 个不兼容节点", last_update: Math.floor(Date.now() / 1000) - 920, status: "ok", url_configured: true },
   ],
 };
 
@@ -123,22 +124,34 @@ async function handleRpc(request, response) {
     } else if (method === "ports_apply" || method === "ports_confirm" || method === "apply") {
       data = { ok: true, confirmation_timeout: 90 };
     } else if (method === "subscription_add") {
+      const id = `sub-${Date.now()}`;
       mock.subscriptions.push({
-        id: `sub-${Date.now()}`,
+        id,
         name: params.name,
+        url: params.url,
         format: "sing-box",
+        node_count: 0,
+        skipped_count: 0,
         last_update: 0,
         status: "new",
         url_configured: true,
       });
-      data = { ok: true };
+      data = { ok: true, id };
     } else if (method === "subscription_update") {
       mock.subscriptions = mock.subscriptions.map((item) =>
         item.id === params.id
           ? { ...item, last_update: Math.floor(Date.now() / 1000), status: "ok" }
           : item,
       );
-      data = { ok: true };
+      const subscription = mock.subscriptions.find((item) => item.id === params.id);
+      data = { ok: true, node_count: subscription?.node_count || 0, skipped_count: subscription?.skipped_count || 0 };
+    } else if (method === "subscription_get") {
+      data = mock.subscriptions.find((item) => item.id === params.id) || { ok: false, error: "Subscription not found" };
+    } else if (method === "subscription_save") {
+      mock.subscriptions = mock.subscriptions.map((item) =>
+        item.id === params.id ? { ...item, name: params.name, url: params.url } : item,
+      );
+      data = { ok: true, id: params.id };
     } else if (method === "subscription_delete") {
       mock.subscriptions = mock.subscriptions.filter((item) => item.id !== params.id);
       data = { ok: true };
@@ -150,7 +163,7 @@ async function handleRpc(request, response) {
     } else if (method === "egress_check") {
       data = { ok: true, ip: "203.0.113.10", mode: "node", blocked: false };
     } else if (method === "update_check") {
-      data = { ok: true, current_version: "0.2.1-alpha", latest_version: "0.2.1-alpha", available: false };
+      data = { ok: true, current_version: "0.2.2-alpha", latest_version: "0.2.2-alpha", available: false };
     } else if (method === "backup_create") {
       data = { ok: true, filename: "ProxyOS-backup-preview.tar.gz", data_base64: "H4sIAAAAAAACAAMAAAAAAAAAAA==" };
     } else {

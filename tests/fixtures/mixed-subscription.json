@@ -1,0 +1,16 @@
+{
+  "outbounds": [
+    {
+      "type": "socks",
+      "tag": "Valid fixture node",
+      "server": "127.0.0.1",
+      "server_port": 1080
+    },
+    {
+      "type": "unsupported-protocol",
+      "tag": "Invalid fixture node",
+      "server": "invalid.example.com",
+      "server_port": 443
+    }
+  ]
+}

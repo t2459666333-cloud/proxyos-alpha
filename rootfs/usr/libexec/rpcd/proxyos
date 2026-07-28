@@ -26,7 +26,9 @@ case "$1" in
   "ports_apply": {"assignments_json":""},
   "ports_confirm": {},
   "subscriptions": {},
+  "subscription_get": {"id":""},
   "subscription_add": {"name":"", "url":""},
+  "subscription_save": {"id":"", "name":"", "url":""},
   "subscription_update": {"id":""},
   "subscription_delete": {"id":""},
   "policy_settings": {},
@@ -89,6 +91,12 @@ EOF
 				;;
 			subscription_add)
 				exec "$CTL" subscription-add "$input"
+				;;
+			subscription_get)
+				exec "$CTL" subscription-get "$input"
+				;;
+			subscription_save)
+				exec "$CTL" subscription-save "$input"
 				;;
 			subscription_update)
 				exec "$CTL" subscription-update "$input"

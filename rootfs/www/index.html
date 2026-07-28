@@ -5,15 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>ProxyOS</title>
-    <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.2.1" />
+    <link rel="icon" type="image/svg+xml" href="/assets/proxyos-mark.svg?v=0.2.2" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.2.2" />
   </head>
   <body>
     <div id="toast" class="toast" aria-live="polite"></div>
 
     <section id="login-screen" class="login-screen">
       <form id="login-form" class="login-card">
-        <div class="brand login-brand"><span class="brand-mark">P</span><span>ProxyOS</span></div>
+        <div class="brand login-brand"><img class="brand-mark" src="/assets/proxyos-mark.svg" alt="" /><span>ProxyOS</span></div>
         <h1>登录管理后台</h1>
         <p>统一管理每台设备的独立网络出口。</p>
         <label>用户名<input id="login-user" value="root" autocomplete="username" /></label>
@@ -25,7 +25,7 @@
 
     <div id="app-shell" class="app-shell is-hidden">
       <aside class="sidebar">
-        <div class="brand"><span class="brand-mark">P</span><span>ProxyOS</span></div>
+        <div class="brand"><img class="brand-mark" src="/assets/proxyos-mark.svg" alt="" /><span>ProxyOS</span></div>
         <nav id="main-nav" class="main-nav">
           <button class="nav-item is-active" data-page="dashboard"><span class="icon" data-icon="home"></span><span>概览</span></button>
           <button class="nav-item" data-page="devices"><span class="icon" data-icon="monitor"></span><span>设备</span></button>
@@ -49,7 +49,7 @@
       </aside>
 
       <header class="mobile-header">
-        <div class="brand"><span class="brand-mark">P</span><span>ProxyOS</span></div>
+        <div class="brand"><img class="brand-mark" src="/assets/proxyos-mark.svg" alt="" /><span>ProxyOS</span></div>
         <button id="mobile-menu-button" class="icon-button" aria-label="打开菜单">☰</button>
       </header>
 
@@ -98,7 +98,7 @@
             </div>
             <div class="table-wrap">
               <table class="data-table device-table">
-                <thead><tr><th class="check-col"><input type="checkbox" disabled /></th><th>设备信息</th><th>连接类型</th><th>本地 IP</th><th>分配节点</th><th>协议</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
+                <thead><tr><th class="check-col"><input type="checkbox" disabled /></th><th>设备信息</th><th>连接类型</th><th>本地 IP</th><th>分配节点</th><th>出口 IP</th><th>协议</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
                 <tbody id="device-table-body"></tbody>
               </table>
             </div>
@@ -120,6 +120,7 @@
               <div class="tab-group compact" id="node-health-tabs">
                 <button class="is-active" data-value="all">全部</button><button data-value="available">可用</button><button data-value="error">异常</button>
               </div>
+              <select id="node-subscription-filter" aria-label="按订阅分组"><option value="all">全部订阅</option></select>
               <div class="node-filter-spacer"></div>
               <select id="node-protocol-filter"><option value="all">全部协议</option><option value="shadowsocks">Shadowsocks</option><option value="vmess">VMess</option><option value="vless">VLESS</option><option value="trojan">Trojan</option><option value="hysteria2">Hysteria 2</option><option value="tuic">TUIC</option><option value="socks">SOCKS</option><option value="http">HTTP</option></select>
               <label class="search-box node-search"><span class="icon" data-icon="search"></span><input id="node-search" placeholder="搜索节点名称或地址" /></label>
@@ -197,8 +198,8 @@
           <div class="drawer-device-title"><span class="device-avatar large"><span class="icon" data-icon="smartphone"></span></span><div><h2 id="drawer-device-name">设备设置</h2><p id="drawer-device-platform">未知设备</p><small id="drawer-device-line">—</small></div><span class="status-badge online">在线</span></div>
           <button class="icon-button close-layer">×</button>
         </div>
-        <div class="drawer-tabs"><button class="is-active">设备设置</button><button>连接信息</button></div>
-        <form id="device-policy-form" class="drawer-body">
+        <div class="drawer-tabs"><button type="button" class="is-active" data-drawer-tab="settings">设备设置</button><button type="button" data-drawer-tab="connection">连接信息</button></div>
+        <form id="device-policy-form" class="drawer-body" data-drawer-panel="settings">
           <fieldset class="radio-list">
             <legend>连接策略</legend>
             <label><span class="option-icon"><span class="icon" data-icon="monitor"></span></span><span class="option-copy"><strong>系统默认</strong><small>使用系统默认的路由策略</small></span><input type="radio" name="policy" value="system_default" /></label>
@@ -215,6 +216,29 @@
           </div>
           <div class="drawer-actions"><button type="button" class="button button-ghost close-layer">取消</button><button class="button button-primary" type="submit">保存设置</button></div>
         </form>
+        <section id="device-connection-panel" class="drawer-body drawer-connection is-hidden" data-drawer-panel="connection">
+          <article class="connection-hero">
+            <span class="connection-hero-icon"><span class="icon" data-icon="network"></span></span>
+            <div><small>当前接入</small><strong id="drawer-info-connection">—</strong><span id="drawer-info-status">正在读取状态</span></div>
+          </article>
+          <article class="connection-details">
+            <h3>设备信息</h3>
+            <div class="connection-detail-row"><span>本地 IP</span><strong id="drawer-info-ip">—</strong></div>
+            <div class="connection-detail-row"><span>MAC 地址</span><strong id="drawer-info-mac">—</strong></div>
+            <div class="connection-detail-row"><span>设备平台</span><strong id="drawer-info-platform">—</strong></div>
+            <div class="connection-detail-row"><span>信号 / 频段</span><strong id="drawer-info-radio">—</strong></div>
+          </article>
+          <article class="connection-details">
+            <h3>出口路由</h3>
+            <div class="connection-detail-row"><span>当前策略</span><strong id="drawer-info-policy">—</strong></div>
+            <div class="connection-detail-row"><span>分配节点</span><strong id="drawer-info-node">—</strong></div>
+            <div class="connection-detail-row"><span>故障处理</span><strong id="drawer-info-failure">—</strong></div>
+          </article>
+          <article class="egress-result-card">
+            <div><small>公网出口 IP</small><strong id="drawer-egress-ip">尚未检测</strong><span>检测请求由软路由按本设备策略发出</span></div>
+            <button id="drawer-egress-check" type="button" class="button button-primary"><span class="icon" data-icon="target"></span>检测出口</button>
+          </article>
+        </section>
       </aside>
     </div>
 
@@ -246,11 +270,33 @@
           <label>订阅名称<input id="subscription-name" required placeholder="例如：主订阅" /></label>
           <label>订阅地址<input id="subscription-url" required type="url" placeholder="支持 Clash YAML、Base64、分享链接与 sing-box JSON" /></label>
           <p class="form-note">系统会自动识别格式；订阅更新后会按稳定节点 ID 保留设备绑定。</p>
-          <div class="modal-actions"><button type="button" class="button button-ghost close-layer">取消</button><button class="button button-primary" type="submit">保存订阅</button></div>
+          <div class="modal-actions"><button type="button" class="button button-ghost close-layer">取消</button><button class="button button-primary" type="submit">保存并导入</button></div>
         </form>
       </section>
     </div>
 
-    <script src="/assets/app.js?v=0.2.1" type="module"></script>
+    <div id="subscription-detail-modal" class="modal-backdrop is-hidden">
+      <section class="modal modal-small subscription-detail-modal">
+        <div class="modal-head"><div><h2>订阅信息</h2><p>修改名称或地址时保留原订阅 ID 和设备绑定。</p></div><button class="icon-button close-layer">×</button></div>
+        <form id="subscription-detail-form" class="modal-body">
+          <input id="subscription-detail-id" type="hidden" />
+          <label>订阅名称<input id="subscription-detail-name" required /></label>
+          <label>订阅地址<input id="subscription-detail-url" required type="url" /></label>
+          <div class="subscription-facts">
+            <div><span>识别格式</span><strong id="subscription-detail-format">—</strong></div>
+            <div><span>已导入节点</span><strong id="subscription-detail-count">—</strong></div>
+            <div><span>跳过条目</span><strong id="subscription-detail-skipped">—</strong></div>
+            <div><span>最后更新</span><strong id="subscription-detail-updated">—</strong></div>
+          </div>
+          <p id="subscription-detail-message" class="form-note"></p>
+          <div class="modal-actions split-actions">
+            <button id="subscription-detail-delete" type="button" class="button button-danger-soft">删除订阅</button>
+            <div><button type="button" class="button button-ghost close-layer">取消</button><button class="button button-primary" type="submit">保存并更新</button></div>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <script src="/assets/app.js?v=0.2.2" type="module"></script>
   </body>
 </html>

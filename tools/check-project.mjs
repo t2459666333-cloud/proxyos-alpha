@@ -15,6 +15,7 @@ const required = [
   "rootfs/www/index.html",
   "rootfs/www/assets/app.css",
   "rootfs/www/assets/app.js",
+  "rootfs/www/assets/proxyos-mark.svg",
   "rootfs/etc/proxyos/config-template.json",
 ];
 
@@ -59,7 +60,38 @@ const tun = template.inbounds?.find((item) => item.type === "tun");
 if (!tun?.auto_route || !tun?.auto_redirect) {
   throw new Error("TUN auto_route and auto_redirect must both be enabled");
 }
+if (tun.mtu > 1500) {
+  throw new Error("TUN MTU must remain compatible with common Ethernet links");
+}
+
+const indexHtml = await readFile(path.join(root, "rootfs/www/index.html"), "utf8");
+const appScript = await readFile(path.join(root, "rootfs/www/assets/app.js"), "utf8");
+for (const requiredId of [
+  "node-subscription-filter",
+  "subscription-detail-modal",
+  "subscription-detail-form",
+  "subscription-detail-delete",
+]) {
+  if (!indexHtml.includes(`id="${requiredId}"`)) {
+    throw new Error(`ProxyOS UI is missing required control: ${requiredId}`);
+  }
+}
+if (!indexHtml.includes('href="/assets/proxyos-mark.svg')) {
+  throw new Error("ProxyOS browser icon must use the product logo");
+}
+for (const requiredBehavior of [
+  "groupedNodeOptions",
+  "openSubscriptionDetails",
+  "saveSubscriptionDetails",
+  "subscription_get",
+  "subscription_save",
+  "scheduleEgressChecks",
+  "egressByDevice",
+]) {
+  if (!appScript.includes(requiredBehavior)) {
+    throw new Error(`ProxyOS UI is missing required behavior: ${requiredBehavior}`);
+  }
+}
 
 console.log(`ProxyOS project check passed (${required.length} required files).`);
 process.exit(0);
-

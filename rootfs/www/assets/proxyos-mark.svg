@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="ProxyOS">
+  <defs>
+    <linearGradient id="a" x1="5" y1="3" x2="25" y2="27" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4b8cff"/>
+      <stop offset="1" stop-color="#245bf2"/>
+    </linearGradient>
+    <linearGradient id="b" x1="10" y1="15" x2="4" y2="29" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2f71ff"/>
+      <stop offset="1" stop-color="#5a96ff"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#a)" d="M5.1 4.1h12.5c6.1 0 9.7 3.2 9.7 8.3 0 5.3-3.9 8.5-10.2 8.5h-4.3l1-5.4h3.8c2.7 0 4.2-1.1 4.2-3 0-1.8-1.4-2.8-3.9-2.8H4.1L5.1 4.1Z"/>
+  <path fill="url(#b)" d="M6.4 12.2h7.3l-2.8 15.7H3.6l2.8-15.7Z"/>
+  <path fill="#81adff" d="M13.7 12.2h5.8c1.5 0 2.3.7 2.3 1.8 0 1.2-1 2-2.7 2h-6.2l.8-3.8Z" opacity=".9"/>
+</svg>
