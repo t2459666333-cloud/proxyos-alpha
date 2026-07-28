@@ -81,7 +81,6 @@ PACKAGES=(
   "kmod-r8169"
   "kmod-ixgbe"
   "kmod-i40e"
-  "kmod-virtio-net"
   "kmod-vmxnet3"
 )
 
