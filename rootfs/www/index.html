@@ -5,73 +5,46 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>ProxyOS</title>
-    <link rel="stylesheet" href="/assets/app.css" />
+    <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.2.0" />
   </head>
   <body>
     <div id="toast" class="toast" aria-live="polite"></div>
 
     <section id="login-screen" class="login-screen">
-      <div class="login-visual">
-        <div class="brand brand-light">
-          <span class="brand-mark">P</span>
-          <span>ProxyOS</span>
-        </div>
-        <div class="login-copy">
-          <span class="eyebrow eyebrow-light">PER-DEVICE NETWORK CONTROL</span>
-          <h1>每台设备，<br />都有自己的网络出口。</h1>
-          <p>有线与 Wi‑Fi 设备统一管理，节点切换清晰、快速，并默认防止故障后直连泄漏。</p>
-        </div>
-        <div class="network-orbit" aria-hidden="true">
-          <span class="orbit-center">P</span>
-          <span class="orbit-dot orbit-a"></span>
-          <span class="orbit-dot orbit-b"></span>
-          <span class="orbit-dot orbit-c"></span>
-        </div>
-      </div>
-      <div class="login-panel">
-        <form id="login-form" class="login-card">
-          <div class="mobile-brand">
-            <span class="brand-mark">P</span>
-            <span>ProxyOS</span>
-          </div>
-          <span class="eyebrow">欢迎回来</span>
-          <h2>登录管理后台</h2>
-          <p>使用 OpenWrt 管理员账号登录。</p>
-          <label>
-            用户名
-            <input id="login-user" value="root" autocomplete="username" />
-          </label>
-          <label>
-            密码
-            <input id="login-password" type="password" autocomplete="current-password" placeholder="首次启动可留空" />
-          </label>
-          <button class="button button-primary button-block" type="submit">
-            登录 ProxyOS
-          </button>
-          <small>Alpha 首次启动使用空密码。登录后请立即通过 SSH 执行 passwd。</small>
-        </form>
-      </div>
+      <form id="login-form" class="login-card">
+        <div class="brand login-brand"><span class="brand-mark">P</span><span>ProxyOS</span></div>
+        <h1>登录管理后台</h1>
+        <p>统一管理每台设备的独立网络出口。</p>
+        <label>用户名<input id="login-user" value="root" autocomplete="username" /></label>
+        <label>密码<input id="login-password" type="password" autocomplete="current-password" placeholder="请输入管理员密码" /></label>
+        <button class="button button-primary button-block" type="submit">登录 ProxyOS</button>
+        <small>首次启动密码为空。登录后请在“系统”页面设置管理员密码。</small>
+      </form>
     </section>
 
     <div id="app-shell" class="app-shell is-hidden">
       <aside class="sidebar">
-        <div class="brand">
-          <span class="brand-mark">P</span>
-          <span>ProxyOS</span>
-        </div>
+        <div class="brand"><span class="brand-mark">P</span><span>ProxyOS</span></div>
         <nav id="main-nav" class="main-nav">
-          <button class="nav-item is-active" data-page="dashboard"><span>⌂</span>概览</button>
-          <button class="nav-item" data-page="devices"><span>▣</span>设备</button>
-          <button class="nav-item" data-page="nodes"><span>◇</span>节点</button>
-          <button class="nav-item" data-page="subscriptions"><span>↻</span>订阅</button>
-          <button class="nav-item" data-page="wifi"><span>◔</span>Wi‑Fi</button>
-          <button class="nav-item" data-page="policies"><span>⌘</span>策略</button>
-          <button class="nav-item" data-page="network"><span>⇄</span>网络</button>
-          <button class="nav-item" data-page="system"><span>⚙</span>系统</button>
+          <button class="nav-item is-active" data-page="dashboard"><span class="icon" data-icon="home"></span><span>概览</span></button>
+          <button class="nav-item" data-page="devices"><span class="icon" data-icon="monitor"></span><span>设备</span></button>
+          <button class="nav-item" data-page="nodes"><span class="icon" data-icon="globe"></span><span>节点</span></button>
+          <button class="nav-item" data-page="subscriptions"><span class="icon" data-icon="folder"></span><span>订阅</span></button>
+          <button class="nav-item" data-page="wifi"><span class="icon" data-icon="wifi"></span><span>Wi‑Fi</span></button>
+          <button class="nav-item" data-page="policies"><span class="icon" data-icon="shield"></span><span>策略</span></button>
+          <button class="nav-item" data-page="network"><span class="icon" data-icon="network"></span><span>网络</span></button>
+          <button class="nav-item" data-page="system"><span class="icon" data-icon="settings"></span><span>系统</span></button>
         </nav>
-        <div class="sidebar-foot">
-          <div class="core-status"><span id="sidebar-core-dot" class="status-dot"></span><span id="sidebar-core-text">核心检测中</span></div>
-          <button id="logout-button" class="text-button">退出登录</button>
+        <div class="sidebar-system-card">
+          <div class="system-ok"><i></i><strong id="sidebar-core-text">系统状态检测中</strong></div>
+          <dl>
+            <div><dt>运行时间</dt><dd id="sidebar-uptime">—</dd></div>
+            <div><dt>系统版本</dt><dd id="sidebar-version">—</dd></div>
+            <div><dt>内核版本</dt><dd id="sidebar-kernel">—</dd></div>
+          </dl>
+          <button class="sidebar-update refresh-button"><span class="icon" data-icon="refresh"></span>检查更新</button>
+          <button id="logout-button" class="sidebar-logout">退出登录</button>
         </div>
       </aside>
 
@@ -82,142 +55,136 @@
 
       <main class="main-content">
         <section id="page-dashboard" class="page is-active">
-          <div class="page-heading">
-            <div>
-              <span class="eyebrow">SYSTEM OVERVIEW</span>
-              <h1>早上好，网络运行状态一目了然。</h1>
-            </div>
-            <button class="button button-soft refresh-button">刷新状态</button>
-          </div>
-          <div id="alpha-banner" class="notice">
-            <span>Alpha 0.1</span>
-            <p>这是首次硬件测试版本。刷入实体硬盘前，请先在 PVE、VMware 或 VirtualBox 验证。</p>
+          <div class="page-title-row">
+            <h1>系统概览</h1>
+            <span id="global-health" class="health-pill"><span class="icon" data-icon="check-circle"></span>系统运行正常</span>
           </div>
           <div id="metric-grid" class="metric-grid"></div>
-          <div class="dashboard-grid">
-            <article class="card traffic-card">
-              <div class="card-heading">
-                <div><span class="eyebrow">LIVE TRAFFIC</span><h3>网络状态</h3></div>
-                <span class="live-pill"><i></i>实时</span>
+
+          <article id="dashboard-wifi" class="wifi-strip"></article>
+
+          <article class="panel dashboard-device-panel">
+            <div class="panel-head">
+              <h2>设备导出概览</h2>
+              <div class="head-actions">
+                <button class="button button-ghost refresh-button"><span class="icon" data-icon="refresh"></span>刷新</button>
+                <button id="dashboard-filter" class="button button-ghost"><span class="icon" data-icon="filter"></span>筛选</button>
               </div>
-              <div class="traffic-visual" aria-hidden="true">
-                <svg viewBox="0 0 620 190" preserveAspectRatio="none">
-                  <defs>
-                    <linearGradient id="trafficFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stop-color="#2367f2" stop-opacity=".22" />
-                      <stop offset="100%" stop-color="#2367f2" stop-opacity="0" />
-                    </linearGradient>
-                  </defs>
-                  <path class="grid-line" d="M0 40 H620 M0 95 H620 M0 150 H620" />
-                  <path class="traffic-area" d="M0 160 C45 152,58 98,103 116 S167 48,207 84 S270 142,312 98 S374 45,421 82 S493 146,534 90 S590 48,620 66 V190 H0Z" />
-                  <path class="traffic-line" d="M0 160 C45 152,58 98,103 116 S167 48,207 84 S270 142,312 98 S374 45,421 82 S493 146,534 90 S590 48,620 66" />
-                </svg>
-              </div>
-              <div class="traffic-legend">
-                <div><span>下载</span><strong id="download-rate">—</strong></div>
-                <div><span>上传</span><strong id="upload-rate">—</strong></div>
-                <div><span>系统负载</span><strong id="load-rate">—</strong></div>
-              </div>
-            </article>
-            <article class="card device-summary-card">
-              <div class="card-heading">
-                <div><span class="eyebrow">DEVICE EGRESS</span><h3>设备出口</h3></div>
-                <button class="text-button" data-go-page="devices">查看全部</button>
-              </div>
-              <div id="dashboard-devices" class="compact-list"></div>
-            </article>
-          </div>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table dashboard-table">
+                <thead><tr><th>设备名称</th><th>本地 IP</th><th>连接类型</th><th>分配节点</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody id="dashboard-device-body"></tbody>
+              </table>
+            </div>
+            <div class="table-foot" id="dashboard-device-count">共 0 台在线设备</div>
+          </article>
         </section>
 
         <section id="page-devices" class="page">
-          <div class="page-heading">
-            <div><span class="eyebrow">PER-DEVICE ROUTING</span><h1>设备管理</h1><p>为每台有线或 Wi‑Fi 设备分配独立出口。</p></div>
-            <button class="button button-soft refresh-button">重新发现</button>
+          <div class="page-title-row"><h1>设备管理</h1></div>
+          <div class="device-filterbar">
+            <label class="search-box"><input id="device-search" placeholder="搜索设备名称 / IP / MAC" /><span class="icon" data-icon="search"></span></label>
+            <select id="device-status-filter"><option value="all">全部状态</option><option value="online">在线</option><option value="offline">离线</option></select>
+            <select id="device-connection-filter"><option value="all">全部连接类型</option><option value="lan">LAN</option><option value="wifi">Wi‑Fi</option></select>
+            <button class="button button-ghost"><span class="icon" data-icon="filter"></span>更多筛选</button>
           </div>
-          <article class="card table-card">
-            <div class="table-toolbar">
-              <label class="search-box">⌕<input id="device-search" placeholder="搜索名称、IP 或 MAC" /></label>
-              <div class="segmented"><button class="is-active">全部</button><button>在线</button><button>已代理</button></div>
+          <article class="panel device-panel">
+            <div class="batch-toolbar">
+              <label class="check-label"><input id="select-all-devices" type="checkbox" /><span id="selected-device-count">已选择 0 项</span></label>
+              <button id="batch-change-node" class="button button-soft"><span class="icon" data-icon="refresh"></span>批量更换节点</button>
+              <button id="batch-egress-check" class="button button-soft"><span class="icon" data-icon="target"></span>批量出口检测</button>
+              <button id="batch-block" class="button button-danger-soft"><span class="icon" data-icon="ban"></span>批量禁止联网</button>
             </div>
             <div class="table-wrap">
-              <table>
-                <thead><tr><th>设备</th><th>内网地址</th><th>连接</th><th>策略</th><th>当前出口</th><th>状态</th><th></th></tr></thead>
+              <table class="data-table device-table">
+                <thead><tr><th class="check-col"><input type="checkbox" disabled /></th><th>设备信息</th><th>连接类型</th><th>本地 IP</th><th>分配节点</th><th>协议</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
                 <tbody id="device-table-body"></tbody>
               </table>
             </div>
+            <div class="table-foot" id="device-count">共 0 台设备</div>
           </article>
         </section>
 
         <section id="page-nodes" class="page">
-          <div class="page-heading">
-            <div><span class="eyebrow">OUTBOUND LIBRARY</span><h1>节点管理</h1><p>手动节点和订阅节点使用同一个节点库。</p></div>
-            <button id="open-node-modal" class="button button-primary">＋ 添加节点</button>
+          <div class="page-title-row node-title">
+            <div><h1>节点管理</h1><p>管理所有代理节点，支持添加、编辑和测试节点连接</p></div>
+            <button id="open-node-modal" class="button button-primary"><span class="icon" data-icon="plus"></span>添加节点</button>
           </div>
-          <div class="filter-row">
-            <label class="search-box">⌕<input id="node-search" placeholder="搜索节点、协议或服务器" /></label>
-            <button class="button button-soft" id="reload-nodes">刷新</button>
-          </div>
-          <div id="node-grid" class="node-grid"></div>
+          <div id="node-metrics" class="node-metrics"></div>
+          <article class="panel node-panel">
+            <div class="node-filterbar">
+              <div class="tab-group" id="node-source-tabs">
+                <button class="is-active" data-value="all">全部节点</button><button data-value="manual">手动节点</button><button data-value="subscription">订阅节点</button>
+              </div>
+              <div class="tab-group compact" id="node-health-tabs">
+                <button class="is-active" data-value="all">全部</button><button data-value="available">可用</button><button data-value="error">异常</button>
+              </div>
+              <div class="node-filter-spacer"></div>
+              <select id="node-protocol-filter"><option value="all">全部协议</option><option value="shadowsocks">Shadowsocks</option><option value="vmess">VMess</option><option value="vless">VLESS</option><option value="trojan">Trojan</option><option value="hysteria2">Hysteria 2</option><option value="tuic">TUIC</option><option value="socks">SOCKS</option><option value="http">HTTP</option></select>
+              <label class="search-box node-search"><span class="icon" data-icon="search"></span><input id="node-search" placeholder="搜索节点名称或地址" /></label>
+              <button id="reload-nodes" class="icon-button bordered" aria-label="刷新节点"><span class="icon" data-icon="refresh"></span></button>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table node-table">
+                <thead><tr><th>节点名称</th><th>来源</th><th>国家 / 地区</th><th>协议</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody id="node-table-body"></tbody>
+              </table>
+            </div>
+            <div class="table-foot split"><span id="node-count">共 0 条</span><div class="pagination"><button disabled>‹</button><button class="is-active">1</button><button disabled>›</button><select><option>10 条/页</option></select></div></div>
+          </article>
         </section>
 
         <section id="page-subscriptions" class="page">
-          <div class="page-heading">
-            <div><span class="eyebrow">SUBSCRIPTION SOURCES</span><h1>订阅管理</h1><p>刷新后保留稳定节点 ID，设备绑定不会因排序变化而丢失。</p></div>
-            <button id="open-subscription-modal" class="button button-primary">＋ 添加订阅</button>
-          </div>
-          <div class="notice notice-muted">
-            <span>Alpha 格式限制</span><p>此构建只接收包含 <code>outbounds</code> 的 sing-box JSON。Clash 与通用分享链接转换尚未启用。</p>
+          <div class="page-title-row node-title">
+            <div><h1>订阅管理</h1><p>管理代理节点订阅源，更新后保持设备绑定。</p></div>
+            <button id="open-subscription-modal" class="button button-primary"><span class="icon" data-icon="plus"></span>添加订阅</button>
           </div>
           <div id="subscription-grid" class="subscription-grid"></div>
         </section>
 
         <section id="page-wifi" class="page">
-          <div class="page-heading">
-            <div><span class="eyebrow">WIRELESS ACCESS</span><h1>Wi‑Fi</h1><p>系统只在检测到支持 AP 模式的无线网卡后开放控制。</p></div>
-          </div>
+          <div class="page-title-row"><h1>Wi‑Fi 管理</h1><span class="health-pill"><span class="icon" data-icon="check-circle"></span>系统运行正常</span></div>
           <div id="wifi-content"></div>
         </section>
 
         <section id="page-policies" class="page">
-          <div class="page-heading">
-            <div><span class="eyebrow">FAIL-CLOSED ROUTING</span><h1>策略</h1><p>明确每一种设备状态的出口行为。</p></div>
-          </div>
+          <div class="page-title-row node-title"><div><h1>策略管理</h1><p>管理设备默认出口与节点失效行为。</p></div></div>
           <div class="policy-grid">
-            <article class="card policy-card"><span class="policy-icon blue">◎</span><h3>指定节点</h3><p>设备始终使用选中的手动或订阅节点。</p><strong>节点失效：阻断</strong></article>
-            <article class="card policy-card"><span class="policy-icon green">→</span><h3>完全直连</h3><p>设备绕过代理，由本地宽带直接访问。</p><strong>适合电视与可信设备</strong></article>
-            <article class="card policy-card"><span class="policy-icon red">×</span><h3>禁止联网</h3><p>丢弃该设备的外网连接，不回落到真实出口。</p><strong>防泄漏默认行为</strong></article>
-            <article class="card policy-card"><span class="policy-icon violet">◇</span><h3>系统默认</h3><p>跟随系统级默认出口。Alpha 默认设为直连。</p><strong>可统一更改</strong></article>
+            <article class="panel policy-card"><span class="policy-icon blue"><span class="icon" data-icon="target"></span></span><h3>指定节点</h3><p>设备始终使用选中的手动或订阅节点。</p><strong>节点失效时保持断网</strong></article>
+            <article class="panel policy-card"><span class="policy-icon green"><span class="icon" data-icon="globe"></span></span><h3>完全直连</h3><p>设备绕过代理，由本地宽带直接访问。</p><strong>适合可信设备</strong></article>
+            <article class="panel policy-card"><span class="policy-icon red"><span class="icon" data-icon="ban"></span></span><h3>禁止联网</h3><p>阻止设备访问互联网，不泄漏真实出口。</p><strong>立即生效</strong></article>
+            <article class="panel policy-card"><span class="policy-icon violet"><span class="icon" data-icon="refresh"></span></span><h3>系统默认</h3><p>设备跟随系统级默认出口策略。</p><strong>当前默认为直连</strong></article>
           </div>
         </section>
 
         <section id="page-network" class="page">
-          <div class="page-heading">
-            <div><span class="eyebrow">PHYSICAL PORTS</span><h1>网口分配</h1><p>默认第一个物理口为 WAN，第二个及以后为 LAN。</p></div>
+          <div class="page-title-row node-title">
+            <div><h1>网络管理</h1><p>分配物理网口角色。系统默认第一个网口为 WAN，其余为 LAN。</p></div>
             <button id="apply-ports" class="button button-primary">应用网口配置</button>
           </div>
-          <div class="notice notice-warning"><span>安全回滚</span><p>应用后请在 90 秒内确认后台仍可访问，否则系统自动恢复旧配置。</p></div>
+          <div class="notice warning"><strong>安全回滚</strong><span>应用后请在 90 秒内确认，否则系统会自动恢复原配置。</span></div>
           <div id="port-grid" class="port-grid"></div>
-          <div id="port-confirm-panel" class="confirm-panel is-hidden">
-            <div><strong>新的网口配置已应用</strong><p>如果当前网络正常，请确认保留。</p></div>
-            <button id="confirm-ports" class="button button-primary">确认保留配置</button>
-            <span id="rollback-countdown">90 秒后回滚</span>
-          </div>
+          <div id="port-confirm-panel" class="confirm-panel is-hidden"><div><strong>新的网口配置已应用</strong><p>如果当前网络正常，请确认保留。</p></div><button id="confirm-ports" class="button button-primary">确认保留配置</button><span id="rollback-countdown">90 秒后回滚</span></div>
         </section>
 
         <section id="page-system" class="page">
-          <div class="page-heading">
-            <div><span class="eyebrow">SYSTEM CONTROL</span><h1>系统</h1><p>查看版本、核心状态与安全信息。</p></div>
-          </div>
+          <div class="page-title-row"><h1>系统管理</h1><span id="system-health-pill" class="health-pill"><span class="icon" data-icon="check-circle"></span>系统运行正常</span></div>
           <div class="system-grid">
-            <article class="card settings-card">
-              <div class="settings-row"><div><span>ProxyOS 版本</span><strong id="system-version">—</strong></div><span class="badge blue">Alpha</span></div>
-              <div class="settings-row"><div><span>设备型号</span><strong id="system-model">—</strong></div></div>
-              <div class="settings-row"><div><span>内核版本</span><strong id="system-kernel">—</strong></div></div>
+            <article class="panel settings-card">
+              <h2>系统信息</h2>
+              <div class="settings-row"><span>ProxyOS 版本</span><strong id="system-version">—</strong></div>
+              <div class="settings-row"><span>设备型号</span><strong id="system-model">—</strong></div>
+              <div class="settings-row"><span>内核版本</span><strong id="system-kernel">—</strong></div>
+              <div class="settings-row"><span>代理核心</span><strong id="system-core">检测中</strong></div>
+              <button id="apply-config" class="button button-soft">校验并重载代理配置</button>
             </article>
-            <article class="card settings-card">
-              <div class="settings-row"><div><span>代理核心</span><strong id="system-core">检测中</strong></div><button id="apply-config" class="button button-soft">校验并重载</button></div>
-              <div class="settings-row"><div><span>管理密码</span><strong class="danger-text">首次登录后必须设置</strong></div><span>SSH: passwd</span></div>
-              <div class="settings-row"><div><span>高级管理</span><strong>OpenWrt SSH</strong></div><span>root@192.168.10.1</span></div>
+            <article class="panel settings-card">
+              <h2>安全与维护</h2>
+              <div class="settings-row"><span>管理员密码</span><strong class="danger-text">首次启动请立即设置</strong></div>
+              <div class="settings-row"><span>SSH 管理</span><strong>root@192.168.10.1</strong></div>
+              <div class="settings-row"><span>配置备份</span><strong>即将支持</strong></div>
+              <p class="settings-help">当前测试版请通过 SSH 执行 <code>passwd</code> 设置密码。</p>
             </article>
           </div>
         </section>
@@ -226,63 +193,64 @@
 
     <div id="device-drawer" class="drawer-backdrop is-hidden">
       <aside class="drawer">
-        <div class="drawer-head"><div><span class="eyebrow">DEVICE POLICY</span><h2 id="drawer-device-name">设备设置</h2></div><button class="icon-button close-layer">×</button></div>
+        <div class="drawer-head">
+          <div class="drawer-device-title"><span class="device-avatar large"><span class="icon" data-icon="smartphone"></span></span><div><h2 id="drawer-device-name">设备设置</h2><p id="drawer-device-platform">未知设备</p><small id="drawer-device-line">—</small></div><span class="status-badge online">在线</span></div>
+          <button class="icon-button close-layer">×</button>
+        </div>
+        <div class="drawer-tabs"><button class="is-active">设备设置</button><button>连接信息</button></div>
         <form id="device-policy-form" class="drawer-body">
-          <div id="drawer-device-meta" class="device-meta"></div>
           <fieldset class="radio-list">
             <legend>连接策略</legend>
-            <label><input type="radio" name="policy" value="system_default" />系统默认<span>跟随系统出口</span></label>
-            <label><input type="radio" name="policy" value="direct" />完全直连<span>使用本地宽带</span></label>
-            <label><input type="radio" name="policy" value="fixed_node" />指定节点<span>绑定独立公网出口</span></label>
-            <label><input type="radio" name="policy" value="block" />禁止联网<span>防止任何出口泄漏</span></label>
+            <label><span class="option-icon"><span class="icon" data-icon="monitor"></span></span><span class="option-copy"><strong>系统默认</strong><small>使用系统默认的路由策略</small></span><input type="radio" name="policy" value="system_default" /></label>
+            <label><span class="option-icon"><span class="icon" data-icon="globe"></span></span><span class="option-copy"><strong>直连</strong><small>不使用代理，直接连接网络</small></span><input type="radio" name="policy" value="direct" /></label>
+            <label><span class="option-icon"><span class="icon" data-icon="globe"></span></span><span class="option-copy"><strong>指定节点</strong><small>始终使用指定的节点连接</small></span><input type="radio" name="policy" value="fixed_node" /></label>
+            <label><span class="option-icon"><span class="icon" data-icon="refresh"></span></span><span class="option-copy"><strong>自动节点组</strong><small>按来源自动选择当前延迟最低的可用节点</small></span><input type="radio" name="policy" value="auto_node" /></label>
+            <label><span class="option-icon danger"><span class="icon" data-icon="ban"></span></span><span class="option-copy"><strong>禁止联网</strong><small>阻止该设备访问互联网</small></span><input type="radio" name="policy" value="block" /></label>
           </fieldset>
-          <label>指定节点<select id="drawer-node-select"></select></label>
-          <div class="form-note">绑定时会为设备保存静态 DHCP 租约，并在配置检查通过后重启代理核心。</div>
-          <button class="button button-primary button-block" type="submit">保存并应用</button>
+          <div class="drawer-section">
+            <label>节点来源<div class="tab-group stretch"><button type="button" class="is-active">全部</button><button type="button">订阅</button><button type="button">手动</button></div></label>
+            <label>当前节点<select id="drawer-node-select"></select></label>
+            <label>备用节点<select id="drawer-backup-select"><option value="">未设置备用节点</option></select></label>
+            <label>节点故障处理<select id="drawer-failure-mode"><option value="block">保持断网</option><option value="backup">切换备用节点</option><option value="direct">切换直连</option></select></label>
+          </div>
+          <div class="drawer-actions"><button type="button" class="button button-ghost close-layer">取消</button><button class="button button-primary" type="submit">保存设置</button></div>
         </form>
       </aside>
     </div>
 
     <div id="node-modal" class="modal-backdrop is-hidden">
-      <section class="modal">
-        <div class="modal-head"><div><span class="eyebrow">MANUAL OUTBOUND</span><h2>添加代理节点</h2></div><button class="icon-button close-layer">×</button></div>
+      <section class="modal node-modal">
+        <div class="modal-head"><h2>添加节点</h2><button class="icon-button close-layer">×</button></div>
         <form id="node-form" class="modal-body">
           <div class="form-grid">
+            <label>协议类型<select id="node-protocol"><option value="shadowsocks">Shadowsocks</option><option value="vless">VLESS</option><option value="vmess">VMess</option><option value="trojan">Trojan</option><option value="hysteria">Hysteria</option><option value="hysteria2">Hysteria 2</option><option value="tuic">TUIC</option><option value="anytls">AnyTLS</option><option value="wireguard">WireGuard</option><option value="ssh">SSH</option><option value="socks">SOCKS4/5</option><option value="http">HTTP CONNECT</option><option value="raw">高级 sing-box JSON</option></select></label>
             <label>节点名称<input id="node-name" required placeholder="例如：香港 01" /></label>
-            <label>协议
-              <select id="node-protocol">
-                <option value="vless">VLESS</option><option value="vmess">VMess</option>
-                <option value="trojan">Trojan</option><option value="shadowsocks">Shadowsocks</option>
-                <option value="socks">SOCKS4/5</option><option value="http">HTTP CONNECT</option>
-                <option value="hysteria2">Hysteria 2</option><option value="tuic">TUIC</option>
-                <option value="raw">高级 sing-box JSON</option>
-              </select>
-            </label>
-            <label class="standard-node-field">服务器<input id="node-server" placeholder="example.com" /></label>
-            <label class="standard-node-field">端口<input id="node-port" type="number" min="1" max="65535" placeholder="443" /></label>
-            <label class="standard-node-field">UUID / 用户名<input id="node-identity" /></label>
-            <label class="standard-node-field">密码 / 密钥<input id="node-secret" type="password" /></label>
+            <label class="standard-node-field span-2">服务器地址<input id="node-server" placeholder="例如：hk-01.proxyos.com" /></label>
+            <label class="standard-node-field">端口<input id="node-port" type="number" min="1" max="65535" placeholder="例如：443" /></label>
+            <label class="standard-node-field">UUID / 用户名 / 加密方式<input id="node-identity" placeholder="协议身份字段" /></label>
+            <label class="standard-node-field">密码 / 密钥<input id="node-secret" type="password" placeholder="请输入密码" /></label>
+            <label class="standard-node-field">传输协议<select id="node-transport"><option value="">TCP</option><option value="ws">WebSocket</option><option value="grpc">gRPC</option><option value="http">HTTP</option></select></label>
+            <label id="tls-field">TLS<select id="node-tls-select"><option value="false">不启用</option><option value="true">启用</option></select><input id="node-tls" class="is-hidden" type="checkbox" /></label>
           </div>
-          <label id="tls-field" class="switch-row"><span><strong>TLS</strong><small>为支持 TLS 的协议添加基础 TLS 配置</small></span><input id="node-tls" type="checkbox" checked /></label>
-          <label id="raw-json-field" class="is-hidden">Outbound JSON<textarea id="node-raw-json" rows="11" spellcheck="false" placeholder='{"type":"vless","server":"example.com","server_port":443,"uuid":"...","tls":{"enabled":true}}'></textarea></label>
-          <div class="form-note">Reality、gRPC、WireGuard、AnyTLS 等完整高级参数请使用原生 JSON；系统会原样保留并用 sing-box 检查。</div>
-          <button class="button button-primary button-block" type="submit">检查并保存节点</button>
+          <label id="raw-json-field" class="is-hidden">Outbound JSON<textarea id="node-raw-json" rows="10" spellcheck="false" placeholder='{"type":"vless","server":"example.com","server_port":443,"uuid":"..."}'></textarea></label>
+          <details><summary>高级设置</summary><p class="form-note">Reality、WireGuard、AnyTLS、SSH 等完整参数可以通过高级 sing-box JSON 导入。</p></details>
+          <div class="modal-actions"><button type="button" class="button button-ghost close-layer">取消</button><button class="button button-primary" type="submit">保存</button></div>
         </form>
       </section>
     </div>
 
     <div id="subscription-modal" class="modal-backdrop is-hidden">
       <section class="modal modal-small">
-        <div class="modal-head"><div><span class="eyebrow">NEW SOURCE</span><h2>添加订阅</h2></div><button class="icon-button close-layer">×</button></div>
+        <div class="modal-head"><h2>添加订阅</h2><button class="icon-button close-layer">×</button></div>
         <form id="subscription-form" class="modal-body">
-          <label>订阅名称<input id="subscription-name" required placeholder="例如：主线路" /></label>
-          <label>sing-box JSON 地址<input id="subscription-url" required type="url" placeholder="https://example.com/config.json" /></label>
-          <button class="button button-primary button-block" type="submit">保存订阅</button>
+          <label>订阅名称<input id="subscription-name" required placeholder="例如：主订阅" /></label>
+          <label>订阅地址<input id="subscription-url" required type="url" placeholder="支持 Clash YAML、Base64、分享链接与 sing-box JSON" /></label>
+          <p class="form-note">系统会自动识别格式；订阅更新后会按稳定节点 ID 保留设备绑定。</p>
+          <div class="modal-actions"><button type="button" class="button button-ghost close-layer">取消</button><button class="button button-primary" type="submit">保存订阅</button></div>
         </form>
       </section>
     </div>
 
-    <script src="/assets/app.js" type="module"></script>
+    <script src="/assets/app.js?v=0.2.0" type="module"></script>
   </body>
 </html>
-

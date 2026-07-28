@@ -22,6 +22,19 @@ port_count="$(printf '%s\n' "$ports" | sed '/^$/d' | wc -l)"
 uci set system.@system[0].hostname='ProxyOS'
 uci commit system
 
+# The generic x86 image already contains an anonymous br-lan device section.
+# Remove it before creating ProxyOS' named section so a physical port can never
+# remain configured as both WAN and LAN after first boot.
+while :; do
+	legacy_br_lan="$(
+		uci -q show network |
+			sed -n "s/^network\.\(@device\[[0-9][0-9]*\]\)\.name='br-lan'$/\1/p" |
+			sed -n '1p'
+	)"
+	[ -n "$legacy_br_lan" ] || break
+	uci -q delete "network.${legacy_br_lan}"
+done
+
 if [ "$port_count" -ge 2 ]; then
 	wan_port="$(printf '%s\n' "$ports" | sed -n '1p')"
 	lan_ports="$(printf '%s\n' "$ports" | sed -n '2,$p')"
@@ -80,6 +93,7 @@ uci commit uhttpd
 
 /etc/init.d/sing-box disable >/dev/null 2>&1 || true
 /etc/init.d/proxyos enable
+/etc/init.d/proxyos-health enable
 /etc/init.d/rpcd reload >/dev/null 2>&1 || true
 
 exit 0

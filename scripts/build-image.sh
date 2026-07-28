@@ -24,8 +24,10 @@ done
 mkdir -p "${WORK_DIR}" "${DIST_DIR}"
 chmod 0755 \
   "${PROJECT_DIR}/rootfs/etc/init.d/proxyos" \
+  "${PROJECT_DIR}/rootfs/etc/init.d/proxyos-health" \
   "${PROJECT_DIR}/rootfs/etc/uci-defaults/99-proxyos" \
   "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" \
+  "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/subscription_parser.py" \
   "${PROJECT_DIR}/rootfs/usr/libexec/rpcd/proxyos"
 
 if [[ ! -f "${WORK_DIR}/${ARCHIVE}" ]]; then
@@ -62,6 +64,8 @@ PACKAGES=(
   "nftables-json"
   "ip-full"
   "jq"
+  "python3-light"
+  "python3-yaml"
   "curl"
   "ca-bundle"
   "uhttpd"
@@ -109,8 +113,8 @@ if [[ -z "${EFI_SOURCE}" || -z "${BIOS_SOURCE}" ]]; then
   exit 1
 fi
 
-cp "${EFI_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-Alpha0.1-x86_64-UEFI.img.gz"
-cp "${BIOS_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-Alpha0.1-x86_64-BIOS.img.gz"
+cp "${EFI_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-Alpha0.2.0-x86_64-UEFI.img.gz"
+cp "${BIOS_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-Alpha0.2.0-x86_64-BIOS.img.gz"
 (
   cd "${DIST_DIR}"
   sha256sum ./*.img.gz > SHA256SUMS

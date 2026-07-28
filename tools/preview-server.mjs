@@ -7,7 +7,7 @@ const port = Number(process.env.PORT || 4173);
 
 const mock = {
   status: {
-    version: "0.1.0-alpha",
+    version: "0.2.0-alpha",
     hostname: "ProxyOS",
     model: "Intel N100 · x86-64",
     kernel: "6.12.74",
@@ -24,7 +24,7 @@ const mock = {
     singbox_running: true,
   },
   devices: [
-    { name: "iPhone 16 Pro", mac: "AA:BB:CC:10:20:01", ip: "192.168.10.101", online: true, policy: "fixed_node", node_id: "hk01", connection: "Wi‑Fi 5 GHz" },
+    { name: "iPhone 16 Pro", mac: "AA:BB:CC:10:20:01", ip: "192.168.10.101", online: true, policy: "fixed_node", node_id: "hk01", backup_node_id: "sg01", failure_mode: "backup", auto_source: "all", connection: "Wi‑Fi 5 GHz", signal: -42, band: "5GHz" },
     { name: "Pixel 10", mac: "AA:BB:CC:10:20:02", ip: "192.168.10.102", online: true, policy: "fixed_node", node_id: "us02", connection: "Wi‑Fi 5 GHz" },
     { name: "Workstation", mac: "AA:BB:CC:10:20:03", ip: "192.168.10.103", online: true, policy: "fixed_node", node_id: "jp01", connection: "2.5G LAN" },
     { name: "Living Room TV", mac: "AA:BB:CC:10:20:04", ip: "192.168.10.104", online: true, policy: "direct", node_id: "", connection: "Wi‑Fi 5 GHz" },
@@ -39,6 +39,16 @@ const mock = {
     { id: "uk01", name: "英国 01", protocol: "shadowsocks", source_type: "manual", source_id: "", server: "uk.example.com", server_port: 8388, enabled: true },
   ],
   wifi_status: { available: true, enabled: true, phy: "phy0", driver: "mt7921e", reason: "" },
+  wifi_config: {
+    available: true,
+    enabled: true,
+    guest_enabled: false,
+    bands: [
+      { radio: "radio0", band: "2g", ssid: "ProxyOS-2.4G", encryption: "sae-mixed", channel: "6", htmode: "HE40", country: "CN", enabled: true },
+      { radio: "radio1", band: "5g", ssid: "ProxyOS-5G", encryption: "sae-mixed", channel: "36", htmode: "HE80", country: "CN", enabled: true },
+    ],
+  },
+  policy_settings: { default_policy: "direct", default_node_id: "", health_interval: 300, fail_closed: true },
   ports: [
     { name: "eth0", mac: "00:11:22:33:44:01", state: "up", speed_mbps: 2500, driver: "igc", role: "wan" },
     { name: "eth1", mac: "00:11:22:33:44:02", state: "up", speed_mbps: 2500, driver: "igc", role: "lan" },
@@ -46,7 +56,7 @@ const mock = {
     { name: "eth3", mac: "00:11:22:33:44:04", state: "down", speed_mbps: 0, driver: "igc", role: "unused" },
   ],
   subscriptions: [
-    { id: "sub01", name: "主线路订阅", format: "sing-box", last_update: Math.floor(Date.now() / 1000) - 1840, status: "ok", url_configured: true },
+    { id: "sub01", name: "主线路订阅", format: "clash-yaml", node_count: 5, last_update: Math.floor(Date.now() / 1000) - 1840, status: "ok", url_configured: true },
   ],
 };
 
@@ -79,6 +89,13 @@ async function handleRpc(request, response) {
       });
       mock.status.node_count = mock.nodes.length;
       data = { ok: true };
+    } else if (method === "node_get") {
+      const node = mock.nodes.find((item) => item.id === params.id);
+      data = { ...node, outbound_json: JSON.stringify({ type: node.protocol, server: node.server, server_port: node.server_port }) };
+    } else if (method === "node_update") {
+      const outbound = JSON.parse(params.outbound_json);
+      mock.nodes = mock.nodes.map((node) => node.id === params.id ? { ...node, name: params.name, protocol: outbound.type, server: outbound.server, server_port: outbound.server_port } : node);
+      data = { ok: true };
     } else if (method === "node_delete") {
       mock.nodes = mock.nodes.filter((node) => node.id !== params.id);
       mock.devices = mock.devices.map((device) =>
@@ -96,6 +113,12 @@ async function handleRpc(request, response) {
       data = { ok: true };
     } else if (method === "wifi_toggle") {
       mock.wifi_status.enabled = params.enabled;
+      mock.wifi_config.enabled = params.enabled;
+      data = { ok: true };
+    } else if (method === "wifi_apply") {
+      mock.wifi_config.bands[0].ssid = params.ssid_24;
+      mock.wifi_config.bands[1].ssid = params.ssid_5;
+      mock.wifi_config.guest_enabled = params.guest_enabled;
       data = { ok: true };
     } else if (method === "ports_apply" || method === "ports_confirm" || method === "apply") {
       data = { ok: true, confirmation_timeout: 90 };
@@ -116,6 +139,16 @@ async function handleRpc(request, response) {
           : item,
       );
       data = { ok: true };
+    } else if (method === "subscription_delete") {
+      mock.subscriptions = mock.subscriptions.filter((item) => item.id !== params.id);
+      data = { ok: true };
+    } else if (method === "policy_apply") {
+      mock.policy_settings = { ...mock.policy_settings, ...params };
+      data = { ok: true };
+    } else if (method === "system_logs") {
+      data = { items: ["proxyos: configuration loaded", "proxyos: sing-box is running"] };
+    } else if (method === "backup_create") {
+      data = { ok: true, filename: "ProxyOS-backup-preview.tar.gz", data_base64: "H4sIAAAAAAACAAMAAAAAAAAAAA==" };
     } else {
       data = { ok: true };
     }
@@ -156,4 +189,3 @@ createServer(async (request, response) => {
 }).listen(port, "127.0.0.1", () => {
   console.log(`ProxyOS UI preview: http://127.0.0.1:${port}`);
 });
-

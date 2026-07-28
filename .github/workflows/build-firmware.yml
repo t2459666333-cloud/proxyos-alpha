@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential curl zstd
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl zstd python3-yaml
       - name: Run project checks
         run: npm test && npm run check
       - name: Build images

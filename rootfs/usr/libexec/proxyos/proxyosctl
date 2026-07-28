@@ -8,12 +8,16 @@ SUBSCRIPTIONS_FILE="${STATE_DIR}/subscriptions.json"
 TEMPLATE_FILE="${STATE_DIR}/config-template.json"
 ACTIVE_CONFIG="${STATE_DIR}/sing-box.json"
 LAST_GOOD_CONFIG="${STATE_DIR}/sing-box.last-good.json"
+PARSER="/usr/libexec/proxyos/subscription_parser.py"
 PORT_ROLLBACK_FLAG="/tmp/proxyos-port-rollback.pending"
 PORT_ROLLBACK_CONFIG="/tmp/proxyos-network.rollback"
 
 json_error() {
 	printf '{"ok":false,"error":%s}\n' "$(printf '%s' "$1" | jq -Rs .)"
-	exit 1
+	# rpcd discards a plugin's JSON body when the process exits non-zero and
+	# exposes only a numeric UBUS error. Return a successful transport status
+	# and let the explicit ok:false payload reach the web client.
+	exit 0
 }
 
 json_ok() {
@@ -31,6 +35,12 @@ ensure_state() {
 	[ -s "$NODES_FILE" ] || printf '[]\n' > "$NODES_FILE"
 	[ -s "$DEVICES_FILE" ] || printf '[]\n' > "$DEVICES_FILE"
 	[ -s "$SUBSCRIPTIONS_FILE" ] || printf '[]\n' > "$SUBSCRIPTIONS_FILE"
+	jq 'map(. + {
+		backup_node_id:(.backup_node_id // ""),
+		failure_mode:(.failure_mode // "block"),
+		auto_source:(.auto_source // "all")
+	})' "$DEVICES_FILE" > "${DEVICES_FILE}.migrate"
+	mv "${DEVICES_FILE}.migrate" "$DEVICES_FILE"
 }
 
 physical_interfaces() {
@@ -85,7 +95,7 @@ status() {
 	system_info="$(ubus call system info 2>/dev/null || printf '{}')"
 	board_info="$(ubus call system board 2>/dev/null || printf '{}')"
 	node_count="$(jq 'length' "$NODES_FILE")"
-	bound_count="$(jq '[.[] | select(.policy == "fixed_node")] | length' "$DEVICES_FILE")"
+	bound_count="$(jq '[.[] | select(.policy == "fixed_node" or .policy == "auto_node")] | length' "$DEVICES_FILE")"
 	singbox_running=false
 	if ubus call service list '{"name":"proxyos"}' 2>/dev/null | jq -e '.. | objects | select(.running? == true)' >/dev/null 2>&1; then
 		singbox_running=true
@@ -98,7 +108,7 @@ status() {
 		--argjson bound "$bound_count" \
 		--argjson running "$singbox_running" \
 		'{
-			version:"0.1.0-alpha",
+			version:"0.2.0-alpha",
 			hostname:($board.hostname // "ProxyOS"),
 			model:($board.model // "x86-64"),
 			kernel:($board.kernel // ""),
@@ -114,6 +124,8 @@ status() {
 devices() {
 	tmp_discovered="/tmp/proxyos-devices.$$.jsonl"
 	tmp_result="/tmp/proxyos-devices.$$.json"
+	lan_device="$(ubus call network.interface.lan status 2>/dev/null |
+		jq -r '.l3_device // .device // "br-lan"' 2>/dev/null || printf 'br-lan')"
 	: > "$tmp_discovered"
 
 	if [ -r /tmp/dhcp.leases ]; then
@@ -121,54 +133,111 @@ devices() {
 			[ -n "${mac:-}" ] && [ -n "${ip:-}" ] || continue
 			[ "${hostname:-*}" = "*" ] && hostname="Unknown device"
 			jq -nc \
-				--arg mac "$(printf '%s' "$mac" | tr '[:lower:]' '[:upper:]')" \
+				--arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" \
 				--arg ip "$ip" \
 				--arg name "$hostname" \
 				'{mac:$mac,ip:$ip,name:$name,online:true}' >> "$tmp_discovered"
 		done < /tmp/dhcp.leases
 	fi
 
-	ip neigh show 2>/dev/null | awk '/lladdr/ && $NF != "FAILED" { print $1, $(NF-1) }' |
+	for hostapd_object in $(ubus list 'hostapd.*' 2>/dev/null || true); do
+		wireless_iface="${hostapd_object#hostapd.}"
+		channel="$(iwinfo "$wireless_iface" info 2>/dev/null | sed -n 's/.*Channel: \([0-9][0-9]*\).*/\1/p' | head -n 1)"
+		band="Wi-Fi"
+		[ -z "$channel" ] || {
+			if [ "$channel" -le 14 ]; then band="Wi-Fi 2.4GHz"; else band="Wi-Fi 5GHz"; fi
+		}
+		ubus call "$hostapd_object" get_clients 2>/dev/null |
+			jq -c --arg band "$band" '
+				(.clients // {}) | to_entries[] |
+				{
+					mac:(.key | ascii_upcase),
+					connection:"wifi",
+					band:$band,
+					signal:(.value.signal // null),
+					online:true
+				}
+			' >> "$tmp_discovered" || true
+	done
+
+	ip neigh show dev "$lan_device" 2>/dev/null |
+	awk '
+		/lladdr/ && $NF != "FAILED" {
+			for (i = 1; i <= NF; i++) {
+				if ($i == "lladdr" && (i + 1) <= NF) {
+					print $1, $(i + 1)
+					break
+				}
+			}
+		}
+	' |
 	while read -r ip mac; do
 		[ -n "${mac:-}" ] || continue
+		case "$ip" in *:*) continue ;; esac
 		jq -nc \
-			--arg mac "$(printf '%s' "$mac" | tr '[:lower:]' '[:upper:]')" \
+			--arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" \
 			--arg ip "$ip" \
-			'{mac:$mac,ip:$ip,name:"Unknown device",online:true}' >> "$tmp_discovered"
+			'{mac:$mac,ip:$ip,online:true}' >> "$tmp_discovered"
 	done
 
 	if [ -s "$tmp_discovered" ]; then
-		jq -s 'unique_by(.mac)' "$tmp_discovered" > "$tmp_result"
+		jq -s '
+			group_by(.mac) |
+			map(reduce .[] as $item ({}; . * $item))
+		' "$tmp_discovered" > "$tmp_result"
 	else
 		printf '[]\n' > "$tmp_result"
 	fi
 
-	jq -n --slurpfile discovered "$tmp_result" --slurpfile saved "$DEVICES_FILE" '
-		($saved[0] // [] | map(. + {online:false})) as $configured |
-		reduce ($discovered[0] // [])[] as $live
-			($configured;
-				if any(.[]; .mac == $live.mac) then
-					map(if .mac == $live.mac then . * $live else . end)
-				else . + [$live + {policy:"system_default",node_id:""}]
-				end
-			) |
-		sort_by([(.online | not), .name])
-	'
+	jq -n --slurpfile discovered "$tmp_result" --slurpfile saved "$DEVICES_FILE" '{
+		items: (
+			($saved[0] // [] | map(. + {online:false})) as $configured |
+			reduce ($discovered[0] // [])[] as $live
+				($configured;
+					if any(.[]; .mac == $live.mac) then
+						map(if .mac == $live.mac then . * $live else . end)
+					else . + [{name:"Unknown device"} + $live + {policy:"system_default",node_id:""}]
+					end
+				) |
+			sort_by([(.online | not), .name])
+		)
+	}'
 
 	rm -f "$tmp_discovered" "$tmp_result"
 }
 
 nodes() {
-	jq 'map({
-		id,
-		name,
-		protocol:(.outbound.type // "unknown"),
-		source_type,
-		source_id:(.source_id // ""),
-		server:(.outbound.server // ""),
-		server_port:(.outbound.server_port // 0),
-		enabled:(.enabled // true)
-	})' "$NODES_FILE"
+	jq '{
+		items: map({
+			id,
+			name,
+			protocol:(.outbound.type // "unknown"),
+			source_type,
+			source_id:(.source_id // ""),
+			server:(.outbound.server // ""),
+			server_port:(.outbound.server_port // 0),
+			enabled:(.enabled // true),
+			latency_ms:(.latency_ms // null),
+			status:(.status // "unknown"),
+			last_test:(.last_test // 0)
+		})
+	}' "$NODES_FILE"
+}
+
+node_get() {
+	input="$1"
+	node_id="$(printf '%s' "$input" | jq -r '.id // empty')"
+	[ -n "$node_id" ] || json_error "Node id is required"
+	jq -e --arg id "$node_id" '
+		.[] | select(.id == $id) |
+		{
+			id,
+			name,
+			source_type,
+			source_id:(.source_id // ""),
+			outbound_json:(.outbound | tojson)
+		}
+	' "$NODES_FILE" 2>/dev/null || json_error "Node not found"
 }
 
 node_add() {
@@ -200,6 +269,34 @@ node_add() {
 	json_ok "\"id\":\"${node_id}\""
 }
 
+node_update() {
+	input="$1"
+	node_id="$(printf '%s' "$input" | jq -r '.id // empty')"
+	name="$(printf '%s' "$input" | jq -r '.name // empty')"
+	outbound_json="$(printf '%s' "$input" | jq -r '.outbound_json // empty')"
+	[ -n "$node_id" ] && [ -n "$name" ] || json_error "Node id and name are required"
+	jq -e --arg id "$node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
+		json_error "Node not found"
+	printf '%s' "$outbound_json" | jq -e '
+		type == "object" and
+		(.type | type == "string") and
+		(.type | IN("direct","block","selector","urltest") | not)
+	' >/dev/null 2>&1 || json_error "outbound_json must be a valid proxy outbound object"
+	canonical="$(printf '%s' "$outbound_json" | jq -Sc 'del(.tag)')"
+	tmp_file="${NODES_FILE}.tmp"
+	jq --arg id "$node_id" --arg name "$name" --argjson outbound "$canonical" '
+		map(if .id == $id then
+			.name=$name |
+			.outbound=$outbound |
+			.status="unknown" |
+			.latency_ms=null
+		else . end)
+	' "$NODES_FILE" > "$tmp_file"
+	mv "$tmp_file" "$NODES_FILE"
+	apply_generated_config
+	json_ok
+}
+
 node_delete() {
 	input="$1"
 	node_id="$(printf '%s' "$input" | jq -r '.id // empty')"
@@ -209,36 +306,188 @@ node_delete() {
 	mv "$tmp_file" "$NODES_FILE"
 	tmp_file="${DEVICES_FILE}.tmp"
 	jq --arg id "$node_id" \
-		'map(if .node_id == $id then .policy="block" | .node_id="" else . end)' \
+		'map(
+			if .node_id == $id then
+				.policy="block" | .node_id="" |
+				if .backup_node_id == $id then .backup_node_id="" else . end
+			elif .backup_node_id == $id then
+				.backup_node_id="" | .failure_mode="block"
+			else . end
+		)' \
 		"$DEVICES_FILE" > "$tmp_file"
 	mv "$tmp_file" "$DEVICES_FILE"
 	generate_config >/dev/null
 	json_ok
 }
 
+probe_node() {
+	node_id="$1"
+	server="$(jq -r --arg id "$node_id" '.[] | select(.id == $id) | .outbound.server // empty' "$NODES_FILE")"
+	server_port="$(jq -r --arg id "$node_id" '.[] | select(.id == $id) | .outbound.server_port // empty' "$NODES_FILE")"
+	[ -n "$server" ] && [ -n "$server_port" ] || {
+		printf 'error|null\n'
+		return 0
+	}
+
+	connect_time="$(
+		curl --silent --show-error --output /dev/null \
+			--connect-timeout 4 --max-time 5 \
+			--connect-to "proxyos.test:80:${server}:${server_port}" \
+			--write-out '%{time_connect}' \
+			http://proxyos.test/ 2>/dev/null || true
+	)"
+	case "$connect_time" in
+		""|0|0.0|0.00|0.000|0.0000|0.00000|0.000000)
+			status="error"
+			latency="null"
+			;;
+		*)
+			status="available"
+			latency="$(awk "BEGIN { printf \"%d\", (${connect_time} * 1000) }")"
+			;;
+	esac
+	printf '%s|%s\n' "$status" "$latency"
+}
+
+save_probe() {
+	node_id="$1"
+	status="$2"
+	latency="$3"
+	now="$(date +%s)"
+	tmp_file="${NODES_FILE}.tmp"
+	jq --arg id "$node_id" --arg status "$status" --argjson latency "$latency" --argjson now "$now" '
+		map(if .id == $id then
+			.status=$status |
+			.latency_ms=$latency |
+			.last_test=$now
+		else . end)
+	' "$NODES_FILE" > "$tmp_file"
+	mv "$tmp_file" "$NODES_FILE"
+}
+
+node_test() {
+	input="$1"
+	node_id="$(printf '%s' "$input" | jq -r '.id // empty')"
+	[ -n "$node_id" ] || json_error "Node id is required"
+	jq -e --arg id "$node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
+		json_error "Node not found"
+	result="$(probe_node "$node_id")"
+	status="${result%%|*}"
+	latency="${result#*|}"
+	save_probe "$node_id" "$status" "$latency"
+
+	if [ "$status" = "available" ]; then
+		jq -n --argjson latency "$latency" '{ok:true,status:"available",latency_ms:$latency}'
+	else
+		jq -n '{ok:false,error:"Node connection timed out",status:"error",latency_ms:null}'
+	fi
+}
+
+health_check() {
+	changed=false
+	for node_id in $(jq -r '.[].id' "$NODES_FILE"); do
+		old_status="$(jq -r --arg id "$node_id" '.[] | select(.id == $id) | .status // "unknown"' "$NODES_FILE")"
+		result="$(probe_node "$node_id")"
+		new_status="${result%%|*}"
+		latency="${result#*|}"
+		save_probe "$node_id" "$new_status" "$latency"
+		[ "$new_status" = "$old_status" ] || changed=true
+	done
+	if [ "$changed" = true ]; then
+		apply_generated_config
+	fi
+	json_ok "\"tested\":$(jq 'length' "$NODES_FILE")"
+}
+
+egress_check() {
+	input="$1"
+	node_id="$(printf '%s' "$input" | jq -r '.node_id // empty')"
+	test_config="/tmp/proxyos-egress-test.$$.json"
+	test_log="/tmp/proxyos-egress-test.$$.log"
+	test_port=20809
+	test_pid=""
+	mode="direct"
+	if [ -n "$node_id" ]; then
+		outbound="$(jq -c --arg id "$node_id" '.[] | select(.id == $id) | .outbound' "$NODES_FILE")"
+		[ -n "$outbound" ] || json_error "Selected node does not exist"
+		jq -n --argjson outbound "$outbound" --argjson port "$test_port" '{
+			log:{level:"warn"},
+			inbounds:[{type:"mixed",tag:"test-in",listen:"127.0.0.1",listen_port:$port}],
+			outbounds:[($outbound + {tag:"test-node"}),{type:"direct",tag:"direct"}],
+			route:{rules:[],final:"test-node"}
+		}' > "$test_config"
+		/usr/bin/sing-box check -c "$test_config" >/dev/null 2>"$test_log" ||
+			json_error "The selected node configuration is invalid"
+		/usr/bin/sing-box run -c "$test_config" >"$test_log" 2>&1 &
+		test_pid="$!"
+		sleep 1
+		mode="node"
+	fi
+	if [ -n "$test_pid" ]; then
+		public_ip="$(
+			curl --fail --silent --show-error --location \
+				--proxy "socks5://127.0.0.1:${test_port}" \
+				--connect-timeout 8 --max-time 15 \
+				https://api.ipify.org 2>/dev/null || true
+		)"
+		kill "$test_pid" >/dev/null 2>&1 || true
+		wait "$test_pid" 2>/dev/null || true
+	else
+		public_ip="$(
+			curl --fail --silent --show-error --location \
+				--connect-timeout 8 --max-time 12 \
+				https://api.ipify.org 2>/dev/null || true
+		)"
+	fi
+	rm -f "$test_config" "$test_log"
+	printf '%s' "$public_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' ||
+		json_error "Public exit IP request failed"
+	jq -n --arg ip "$public_ip" --arg mode "$mode" --arg node_id "$node_id" \
+		'{ok:true,ip:$ip,mode:$mode,node_id:$node_id}'
+}
+
 device_bind() {
 	input="$1"
-	mac="$(printf '%s' "$input" | jq -r '.mac // empty' | tr '[:lower:]' '[:upper:]')"
+	mac="$(printf '%s' "$input" | jq -r '.mac // empty' | tr 'a-f' 'A-F')"
 	ip="$(printf '%s' "$input" | jq -r '.ip // empty')"
 	name="$(printf '%s' "$input" | jq -r '.name // "Unknown device"')"
 	policy="$(printf '%s' "$input" | jq -r '.policy // "system_default"')"
 	node_id="$(printf '%s' "$input" | jq -r '.node_id // ""')"
+	backup_node_id="$(printf '%s' "$input" | jq -r '.backup_node_id // ""')"
+	failure_mode="$(printf '%s' "$input" | jq -r '.failure_mode // "block"')"
+	auto_source="$(printf '%s' "$input" | jq -r '.auto_source // "all"')"
 
 	printf '%s' "$mac" | grep -Eq '^([0-9A-F]{2}:){5}[0-9A-F]{2}$' || json_error "Invalid MAC address"
 	printf '%s' "$ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || json_error "Invalid IPv4 address"
 	case "$policy" in
-		system_default|fixed_node|direct|block) ;;
+		system_default|fixed_node|auto_node|direct|block) ;;
 		*) json_error "Invalid device policy" ;;
 	esac
+	case "$failure_mode" in block|backup|direct) ;; *) json_error "Invalid node failure mode" ;; esac
+	case "$auto_source" in all|manual|subscription) ;; *) json_error "Invalid automatic-node source" ;; esac
 	if [ "$policy" = "fixed_node" ]; then
 		jq -e --arg id "$node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
 			json_error "Selected node does not exist"
+	fi
+	if [ -n "$backup_node_id" ]; then
+		jq -e --arg id "$backup_node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
+			json_error "Selected backup node does not exist"
 	fi
 
 	device_json="$(jq -n \
 		--arg mac "$mac" --arg ip "$ip" --arg name "$name" \
 		--arg policy "$policy" --arg node_id "$node_id" \
-		'{mac:$mac,ip:$ip,name:$name,policy:$policy,node_id:$node_id}')"
+		--arg backup "$backup_node_id" --arg failure "$failure_mode" --arg source "$auto_source" \
+		'{
+			mac:$mac,
+			ip:$ip,
+			name:$name,
+			policy:$policy,
+			node_id:$node_id,
+			backup_node_id:$backup,
+			failure_mode:$failure,
+			auto_source:$source
+		}')"
 	tmp_file="${DEVICES_FILE}.tmp"
 	jq --arg mac "$mac" --argjson device "$device_json" \
 		'map(select(.mac != $mac)) + [$device]' "$DEVICES_FILE" > "$tmp_file"
@@ -292,50 +541,93 @@ generate_config() {
 	' > "$tmp_base"
 
 	jq -n --slurpfile devices "$DEVICES_FILE" --slurpfile nodes "$NODES_FILE" '
-		($nodes[0] // [] | map(.id)) as $node_ids |
+		($nodes[0] // []) as $node_list |
+		def usable($id):
+			any($node_list[]; .id == $id and (.enabled // true) and (.status // "unknown") != "error");
+		def fallback($device):
+			if ($device.failure_mode // "block") == "backup" and
+				($device.backup_node_id // "") != "" and usable($device.backup_node_id)
+			then $device.backup_node_id
+			elif ($device.failure_mode // "block") == "direct"
+			then "__direct__"
+			else "__block__"
+			end;
+		def automatic($device):
+			[
+				$node_list[] |
+				select(
+					(.enabled // true) and
+					(.status // "unknown") != "error" and
+					(
+						($device.auto_source // "all") == "all" or
+						.source_type == ($device.auto_source // "all")
+					)
+				)
+			] |
+			sort_by(if .latency_ms == null then 999999 else .latency_ms end) |
+			(.[0].id // "");
+		def resolve($device):
+			if $device.policy == "block" then "__block__"
+			elif $device.policy == "direct" then "__direct__"
+			elif $device.policy == "fixed_node" then
+				if usable($device.node_id) then $device.node_id else fallback($device) end
+			elif $device.policy == "auto_node" then
+				(automatic($device)) as $auto |
+				if $auto != "" then $auto else fallback($device) end
+			else ""
+			end;
+		[
+			($devices[0] // [])[] |
+			select((.ip // "") != "") |
+			. + {effective_outbound:resolve(.)}
+		] as $resolved |
 		{
 			block:[
-				($devices[0] // [])[] |
-				select(
-					(.ip // "") != "" and
-					(
-						.policy == "block" or
-						(.policy == "fixed_node" and (.node_id as $id | $node_ids | index($id)) == null)
-					)
-				) |
+				$resolved[] |
+				select(.effective_outbound == "__block__") |
 				{source_ip_cidr:[(.ip + "/32")],action:"reject",method:"drop"}
 			],
 			route:[
-				($devices[0] // [])[] |
-			select((.ip // "") != "") |
-			({source_ip_cidr:[(.ip + "/32")]} +
-				if .policy == "direct" then
-					{action:"route",outbound:"direct"}
-				elif .policy == "fixed_node" and (.node_id as $id | $node_ids | index($id)) != null then
-					{action:"route",outbound:("node-" + .node_id)}
-				elif .policy == "fixed_node" then
-					empty
-				else empty end)
+				$resolved[] |
+				select(.effective_outbound != "" and .effective_outbound != "__block__") |
+				{
+					source_ip_cidr:[(.ip + "/32")],
+					action:"route",
+					outbound:(
+						if .effective_outbound == "__direct__"
+						then "direct"
+						else "node-" + .effective_outbound
+						end
+					)
+				}
 			],
 			dns:[
-				($devices[0] // [])[] |
-				select((.ip // "") != "") |
-				if .policy == "fixed_node" and (.node_id as $id | $node_ids | index($id)) != null then
-					{source_ip_cidr:[(.ip + "/32")],action:"route",server:("dns-node-" + .node_id)}
-				elif .policy == "direct" or .policy == "system_default" then
-					{source_ip_cidr:[(.ip + "/32")],action:"route",server:"dns-direct"}
-				else empty end
+				$resolved[] |
+				select(.effective_outbound != "__block__") |
+				{
+					source_ip_cidr:[(.ip + "/32")],
+					action:"route",
+					server:(
+						if .effective_outbound == "" or .effective_outbound == "__direct__"
+						then "dns-direct"
+						else "dns-node-" + .effective_outbound
+						end
+					)
+				}
 			]
 		}
 	' > "$tmp_rules"
 
 	final_outbound="direct"
+	default_block=false
 	if [ "$default_policy" = "fixed_node" ] &&
-		jq -e --arg id "$default_node" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null 2>&1; then
+		jq -e --arg id "$default_node" 'any(.[]; .id == $id and (.status // "unknown") != "error")' "$NODES_FILE" >/dev/null 2>&1; then
 		final_outbound="node-${default_node}"
+	elif [ "$default_policy" = "fixed_node" ] || [ "$default_policy" = "block" ]; then
+		default_block=true
 	fi
 
-	jq --slurpfile device_rules "$tmp_rules" --arg final "$final_outbound" '
+	jq --slurpfile device_rules "$tmp_rules" --arg final "$final_outbound" --argjson default_block "$default_block" '
 		.route.rules = (
 			[
 				{action:"sniff"}
@@ -345,7 +637,8 @@ generate_config() {
 				{protocol:"dns",action:"hijack-dns"},
 				{ip_is_private:true,action:"route",outbound:"direct"}
 			] +
-			($device_rules[0].route // [])
+			($device_rules[0].route // []) +
+			(if $default_block then [{action:"reject",method:"drop"}] else [] end)
 		) |
 		.route.final = $final |
 		.dns.rules = ($device_rules[0].dns // [])
@@ -387,15 +680,220 @@ wifi_toggle() {
 	json_ok
 }
 
+wireless_radio_for_band() {
+	requested_band="$1"
+	for radio in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p"); do
+		band="$(uci -q get "wireless.${radio}.band" || true)"
+		case "${requested_band}:${band}" in
+			2g:2g|2g:2.4g|5g:5g|6g:6g) printf '%s\n' "$radio"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+wireless_iface_for_radio() {
+	radio="$1"
+	uci show wireless 2>/dev/null |
+		sed -n "s/^wireless\.\([^.]*\)\.device='${radio}'$/\1/p" |
+		head -n 1
+}
+
+wifi_config() {
+	status_json="$(wifi_status)"
+	tmp_bands="/tmp/proxyos-wifi-bands.$$.jsonl"
+	: > "$tmp_bands"
+	for radio in $(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p"); do
+		band="$(uci -q get "wireless.${radio}.band" || printf 'unknown')"
+		channel="$(uci -q get "wireless.${radio}.channel" || printf 'auto')"
+		htmode="$(uci -q get "wireless.${radio}.htmode" || true)"
+		country="$(uci -q get "wireless.${radio}.country" || printf 'CN')"
+		txpower="$(uci -q get "wireless.${radio}.txpower" || true)"
+		radio_disabled="$(uci -q get "wireless.${radio}.disabled" || printf '0')"
+		iface="$(wireless_iface_for_radio "$radio" || true)"
+		ssid="$(uci -q get "wireless.${iface}.ssid" || true)"
+		encryption="$(uci -q get "wireless.${iface}.encryption" || true)"
+		iface_disabled="$(uci -q get "wireless.${iface}.disabled" || printf '0')"
+		enabled=true
+		[ "$radio_disabled" = "1" ] && enabled=false
+		[ "$iface_disabled" = "1" ] && enabled=false
+		jq -nc \
+			--arg radio "$radio" --arg iface "$iface" --arg band "$band" \
+			--arg ssid "$ssid" --arg encryption "$encryption" --arg channel "$channel" \
+			--arg htmode "$htmode" --arg country "$country" --arg txpower "$txpower" \
+			--argjson enabled "$enabled" \
+			'{
+				radio:$radio,
+				iface:$iface,
+				band:$band,
+				ssid:$ssid,
+				encryption:$encryption,
+				channel:$channel,
+				htmode:$htmode,
+				country:$country,
+				txpower:($txpower | tonumber? // null),
+				enabled:$enabled
+			}' >> "$tmp_bands"
+	done
+	bands="$(jq -s '.' "$tmp_bands")"
+	guest_disabled="$(uci -q get wireless.proxyos_guest.disabled || printf '1')"
+	guest_enabled=false
+	[ "$guest_disabled" = "0" ] && guest_enabled=true
+	guest_ssid="$(uci -q get wireless.proxyos_guest.ssid || printf 'ProxyOS-Guest')"
+	rm -f "$tmp_bands"
+	jq -n --argjson status "$status_json" --argjson bands "$bands" \
+		--argjson guest "$guest_enabled" --arg guest_ssid "$guest_ssid" \
+		'$status + {bands:$bands,guest_enabled:$guest,guest_ssid:$guest_ssid}'
+}
+
+ensure_wireless_iface() {
+	radio="$1"
+	band="$2"
+	iface="$(wireless_iface_for_radio "$radio" || true)"
+	if [ -z "$iface" ]; then
+		iface="proxyos_${band}"
+		uci set "wireless.${iface}=wifi-iface"
+		uci set "wireless.${iface}.device=${radio}"
+		uci set "wireless.${iface}.mode=ap"
+		uci set "wireless.${iface}.network=lan"
+	fi
+	printf '%s\n' "$iface"
+}
+
+wifi_apply() {
+	input="$1"
+	status_json="$(wifi_status)"
+	printf '%s' "$status_json" | jq -e '.available == true' >/dev/null ||
+		json_error "Wi-Fi is unavailable because no AP-capable adapter was detected"
+	ssid_24="$(printf '%s' "$input" | jq -r '.ssid_24 // "ProxyOS-2.4G"')"
+	ssid_5="$(printf '%s' "$input" | jq -r '.ssid_5 // "ProxyOS-5G"')"
+	password="$(printf '%s' "$input" | jq -r '.password // empty')"
+	country="$(printf '%s' "$input" | jq -r '.country // "CN"')"
+	encryption="$(printf '%s' "$input" | jq -r '.encryption // "sae-mixed"')"
+	txpower="$(printf '%s' "$input" | jq -r '.txpower // empty')"
+	channel_24="$(printf '%s' "$input" | jq -r '.channel_24 // "auto"')"
+	channel_5="$(printf '%s' "$input" | jq -r '.channel_5 // "auto"')"
+	htmode_24="$(printf '%s' "$input" | jq -r '.htmode_24 // "HE40"')"
+	htmode_5="$(printf '%s' "$input" | jq -r '.htmode_5 // "HE80"')"
+	guest_enabled="$(printf '%s' "$input" | jq -r '.guest_enabled // false')"
+	printf '%s' "$ssid_24$ssid_5" | grep -q '[[:cntrl:]]' && json_error "SSID contains invalid characters"
+	if [ -n "$password" ]; then
+		[ "${#password}" -ge 8 ] && [ "${#password}" -le 63 ] ||
+			json_error "Wi-Fi password must contain 8 to 63 characters"
+	fi
+	printf '%s' "$country" | grep -Eq '^[A-Z]{2}$' || json_error "Invalid Wi-Fi country code"
+	case "$encryption" in psk2|sae|sae-mixed) ;; *) json_error "Unsupported Wi-Fi security mode" ;; esac
+
+	for requested_band in 2g 5g; do
+		radio="$(wireless_radio_for_band "$requested_band" || true)"
+		[ -n "$radio" ] || continue
+		iface="$(ensure_wireless_iface "$radio" "$requested_band")"
+		existing_key="$(uci -q get "wireless.${iface}.key" || true)"
+		[ -n "$password" ] || password="$existing_key"
+		[ -n "$password" ] || json_error "A Wi-Fi password is required for a new access point"
+		if [ "$requested_band" = "2g" ]; then
+			ssid="$ssid_24"; channel="$channel_24"; htmode="$htmode_24"
+		else
+			ssid="$ssid_5"; channel="$channel_5"; htmode="$htmode_5"
+		fi
+		uci set "wireless.${radio}.country=${country}"
+		uci set "wireless.${radio}.channel=${channel}"
+		uci set "wireless.${radio}.htmode=${htmode}"
+		uci set "wireless.${radio}.disabled=0"
+		[ -z "$txpower" ] || uci set "wireless.${radio}.txpower=${txpower}"
+		uci set "wireless.${iface}.mode=ap"
+		uci set "wireless.${iface}.network=lan"
+		uci set "wireless.${iface}.ssid=${ssid}"
+		uci set "wireless.${iface}.encryption=${encryption}"
+		uci set "wireless.${iface}.key=${password}"
+		uci set "wireless.${iface}.disabled=0"
+	done
+
+	guest_radio="$(wireless_radio_for_band 5g || wireless_radio_for_band 2g || true)"
+	if [ "$guest_enabled" = "true" ]; then
+		[ -n "$guest_radio" ] || json_error "No radio is available for the guest network"
+		uci set network.br_guest='device'
+		uci set network.br_guest.name='br-guest'
+		uci set network.br_guest.type='bridge'
+		uci set network.guest='interface'
+		uci set network.guest.device='br-guest'
+		uci set network.guest.proto='static'
+		uci set network.guest.ipaddr='192.168.30.1'
+		uci set network.guest.netmask='255.255.255.0'
+		uci set dhcp.guest='dhcp'
+		uci set dhcp.guest.interface='guest'
+		uci set dhcp.guest.start='100'
+		uci set dhcp.guest.limit='150'
+		uci set dhcp.guest.leasetime='4h'
+		uci set firewall.proxyos_guest='zone'
+		uci set firewall.proxyos_guest.name='guest'
+		uci set firewall.proxyos_guest.network='guest'
+		uci set firewall.proxyos_guest.input='REJECT'
+		uci set firewall.proxyos_guest.output='ACCEPT'
+		uci set firewall.proxyos_guest.forward='REJECT'
+		uci set firewall.proxyos_guest_wan='forwarding'
+		uci set firewall.proxyos_guest_wan.src='guest'
+		uci set firewall.proxyos_guest_wan.dest='wan'
+		uci set firewall.proxyos_guest_dns='rule'
+		uci set firewall.proxyos_guest_dns.name='Allow-Guest-DNS'
+		uci set firewall.proxyos_guest_dns.src='guest'
+		uci set firewall.proxyos_guest_dns.dest_port='53'
+		uci set firewall.proxyos_guest_dns.proto='tcp udp'
+		uci set firewall.proxyos_guest_dns.target='ACCEPT'
+		uci set firewall.proxyos_guest_dhcp='rule'
+		uci set firewall.proxyos_guest_dhcp.name='Allow-Guest-DHCP'
+		uci set firewall.proxyos_guest_dhcp.src='guest'
+		uci set firewall.proxyos_guest_dhcp.dest_port='67'
+		uci set firewall.proxyos_guest_dhcp.proto='udp'
+		uci set firewall.proxyos_guest_dhcp.family='ipv4'
+		uci set firewall.proxyos_guest_dhcp.target='ACCEPT'
+		uci set wireless.proxyos_guest='wifi-iface'
+		uci set "wireless.proxyos_guest.device=${guest_radio}"
+		uci set wireless.proxyos_guest.mode='ap'
+		uci set wireless.proxyos_guest.network='guest'
+		uci set "wireless.proxyos_guest.ssid=${ssid_5}-Guest"
+		uci set "wireless.proxyos_guest.encryption=${encryption}"
+		uci set "wireless.proxyos_guest.key=${password}"
+		uci set wireless.proxyos_guest.isolate='1'
+		uci set wireless.proxyos_guest.disabled='0'
+	else
+		uci -q set wireless.proxyos_guest.disabled='1' || true
+	fi
+	uci commit network
+	uci commit dhcp
+	uci commit firewall
+	uci commit wireless
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+	/etc/init.d/firewall reload >/dev/null 2>&1 || true
+	wifi reload >/dev/null 2>&1 || json_error "Wireless reload failed"
+	json_ok
+}
+
+wifi_disconnect() {
+	input="$1"
+	mac="$(printf '%s' "$input" | jq -r '.mac // empty' | tr 'a-f' 'A-F')"
+	printf '%s' "$mac" | grep -Eq '^([0-9A-F]{2}:){5}[0-9A-F]{2}$' || json_error "Invalid MAC address"
+	disconnected=false
+	for hostapd_object in $(ubus list 'hostapd.*' 2>/dev/null); do
+		if ubus call "$hostapd_object" del_client "{\"addr\":\"${mac}\",\"reason\":5,\"deauth\":true,\"ban_time\":60000}" >/dev/null 2>&1; then
+			disconnected=true
+		fi
+	done
+	[ "$disconnected" = true ] || json_error "Wireless client is not connected"
+	json_ok
+}
+
 ports() {
 	wan_device="$(uci -q get network.wan.device || true)"
-	lan_ports="$(uci -q show network.br_lan 2>/dev/null |
-		sed -n "s/^network\.br_lan\.ports='\(.*\)'$/\1/p")"
-	first=true
-	printf '['
+	lan_ports="$(uci -q get network.br_lan.ports || true)"
+	if [ -z "$lan_ports" ] && [ -d /sys/class/net/br-lan/brif ]; then
+		for lan_member in /sys/class/net/br-lan/brif/*; do
+			[ -e "$lan_member" ] || continue
+			lan_ports="${lan_ports} ${lan_member##*/}"
+		done
+	fi
+	tmp_ports="/tmp/proxyos-ports.$$.jsonl"
+	: > "$tmp_ports"
 	for iface in $(physical_interfaces); do
-		[ "$first" = true ] || printf ','
-		first=false
 		mac="$(cat "/sys/class/net/${iface}/address" 2>/dev/null || true)"
 		state="$(cat "/sys/class/net/${iface}/operstate" 2>/dev/null || printf 'unknown')"
 		speed="$(cat "/sys/class/net/${iface}/speed" 2>/dev/null || printf '0')"
@@ -406,9 +904,11 @@ ports() {
 		jq -nc \
 			--arg name "$iface" --arg mac "$mac" --arg state "$state" \
 			--arg speed "$speed" --arg driver "$driver" --arg role "$role" \
-			'{name:$name,mac:$mac,state:$state,speed_mbps:($speed|tonumber? // 0),driver:$driver,role:$role}'
+			'{name:$name,mac:$mac,state:$state,speed_mbps:($speed|tonumber? // 0),driver:$driver,role:$role}' \
+			>> "$tmp_ports"
 	done
-	printf ']\n'
+	jq -s '{items:.}' "$tmp_ports"
+	rm -f "$tmp_ports"
 }
 
 ports_apply() {
@@ -474,7 +974,7 @@ subscription_add() {
 	[ -n "$name" ] && [ -n "$url" ] || json_error "Subscription name and URL are required"
 	sub_id="$(printf '%s|%s' "$name" "$url" | sha256sum | cut -c 1-16)"
 	sub_json="$(jq -n --arg id "$sub_id" --arg name "$name" --arg url "$url" \
-		'{id:$id,name:$name,url:$url,format:"sing-box",last_update:0,status:"new"}')"
+		'{id:$id,name:$name,url:$url,format:"auto",node_count:0,last_update:0,status:"new",error:""}')"
 	tmp_file="${SUBSCRIPTIONS_FILE}.tmp"
 	jq --arg id "$sub_id" --argjson sub "$sub_json" \
 		'map(select(.id != $id)) + [$sub]' "$SUBSCRIPTIONS_FILE" > "$tmp_file"
@@ -483,7 +983,21 @@ subscription_add() {
 }
 
 subscriptions() {
-	jq 'map(del(.url) + {url_configured:(.url | length > 0)})' "$SUBSCRIPTIONS_FILE"
+	jq '{items: map(del(.url) + {url_configured:(.url | length > 0)})}' "$SUBSCRIPTIONS_FILE"
+}
+
+subscription_delete() {
+	input="$1"
+	sub_id="$(printf '%s' "$input" | jq -r '.id // empty')"
+	[ -n "$sub_id" ] || json_error "Subscription id is required"
+	jq -e --arg id "$sub_id" 'any(.[]; .id == $id)' "$SUBSCRIPTIONS_FILE" >/dev/null ||
+		json_error "Subscription not found"
+	jq --arg id "$sub_id" 'map(select(.id != $id))' "$SUBSCRIPTIONS_FILE" > "${SUBSCRIPTIONS_FILE}.tmp"
+	mv "${SUBSCRIPTIONS_FILE}.tmp" "$SUBSCRIPTIONS_FILE"
+	jq --arg id "$sub_id" 'map(select(.source_id != $id))' "$NODES_FILE" > "${NODES_FILE}.tmp"
+	mv "${NODES_FILE}.tmp" "$NODES_FILE"
+	apply_generated_config
+	json_ok
 }
 
 subscription_update() {
@@ -491,63 +1005,185 @@ subscription_update() {
 	sub_id="$(printf '%s' "$input" | jq -r '.id // empty')"
 	url="$(jq -r --arg id "$sub_id" '.[] | select(.id == $id) | .url' "$SUBSCRIPTIONS_FILE")"
 	[ -n "$url" ] || json_error "Subscription not found"
-	download="/tmp/proxyos-subscription.$$.json"
-	curl --fail --location --connect-timeout 15 --max-time 60 "$url" -o "$download" ||
+	download="/tmp/proxyos-subscription.$$.txt"
+	parsed="/tmp/proxyos-subscription.$$.parsed.json"
+	curl --fail --location --compressed --connect-timeout 15 --max-time 60 \
+		--user-agent "Clash.Meta/ProxyOS" \
+		--header "Accept: application/json, text/yaml, text/plain, */*" \
+		"$url" -o "$download" ||
 		json_error "Subscription download failed"
-	jq -e '.outbounds | type == "array"' "$download" >/dev/null 2>&1 ||
-		json_error "Alpha 0.1 accepts sing-box JSON subscriptions only"
-
-	new_nodes="/tmp/proxyos-subscription-nodes.$$.json"
-	printf '[]\n' > "$new_nodes"
-	jq -c '.outbounds[] |
-		select(.type != "direct" and .type != "block" and .type != "selector" and .type != "urltest")' "$download" |
-	while read -r outbound; do
-		name="$(printf '%s' "$outbound" | jq -r '.tag // (.server + ":" + (.server_port|tostring))')"
-		canonical="$(printf '%s' "$outbound" | jq -Sc 'del(.tag)')"
-		node_id="$(printf '%s|%s' "$sub_id" "$canonical" | sha256sum | cut -c 1-16)"
-		node_json="$(jq -n --arg id "$node_id" --arg name "$name" --arg sub "$sub_id" \
-			--argjson outbound "$canonical" \
-			'{id:$id,name:$name,source_type:"subscription",source_id:$sub,enabled:true,outbound:$outbound}')"
-		tmp_nodes="${new_nodes}.tmp"
-		jq --argjson node "$node_json" '. + [$node]' "$new_nodes" > "$tmp_nodes"
-		mv "$tmp_nodes" "$new_nodes"
-	done
+	[ -x "$PARSER" ] || json_error "Subscription parser is not installed"
+	parser_error="/tmp/proxyos-subscription.$$.error"
+	if ! "$PARSER" --subscription-id "$sub_id" --input "$download" --output "$parsed" 2>"$parser_error"; then
+		error_text="$(cat "$parser_error" 2>/dev/null || printf 'Subscription parse failed')"
+		rm -f "$download" "$parsed" "$parser_error"
+		json_error "$error_text"
+	fi
+	format="$(jq -r '.format' "$parsed")"
+	node_count="$(jq '.nodes | length' "$parsed")"
 
 	tmp_file="${NODES_FILE}.tmp"
-	jq -n --arg sub "$sub_id" --slurpfile old "$NODES_FILE" --slurpfile fresh "$new_nodes" \
-		'($old[0] | map(select(.source_id != $sub))) + $fresh[0]' > "$tmp_file"
+	jq -n --arg sub "$sub_id" --slurpfile old "$NODES_FILE" --slurpfile parsed "$parsed" '
+		($old[0] // []) as $old_nodes |
+		($parsed[0].nodes // [] |
+			map(. as $fresh |
+				($old_nodes | map(select(.id == $fresh.id)) | .[0]) as $previous |
+				$fresh + {
+					status:($previous.status // "unknown"),
+					latency_ms:($previous.latency_ms // null),
+					last_test:($previous.last_test // 0)
+				}
+			)
+		) as $fresh_nodes |
+		($old_nodes | map(select(.source_id != $sub))) + $fresh_nodes
+	' > "$tmp_file"
 	mv "$tmp_file" "$NODES_FILE"
 	now="$(date +%s)"
 	tmp_file="${SUBSCRIPTIONS_FILE}.tmp"
-	jq --arg id "$sub_id" --argjson now "$now" \
-		'map(if .id == $id then .last_update=$now | .status="ok" else . end)' \
+	jq --arg id "$sub_id" --argjson now "$now" --arg format "$format" --argjson count "$node_count" \
+		'map(if .id == $id then
+			.last_update=$now |
+			.status="ok" |
+			.error="" |
+			.format=$format |
+			.node_count=$count
+		else . end)' \
 		"$SUBSCRIPTIONS_FILE" > "$tmp_file"
 	mv "$tmp_file" "$SUBSCRIPTIONS_FILE"
-	rm -f "$download" "$new_nodes"
+	rm -f "$download" "$parsed" "$parser_error"
+	apply_generated_config
+	json_ok "\"format\":$(printf '%s' "$format" | jq -Rs .),\"node_count\":${node_count}"
+}
+
+policy_settings() {
+	default_policy="$(uci -q get proxyos.main.default_policy || printf 'direct')"
+	default_node_id="$(uci -q get proxyos.main.default_node_id || true)"
+	jq -n --arg policy "$default_policy" --arg node "$default_node_id" \
+		'{default_policy:$policy,default_node_id:$node,health_interval:300,fail_closed:true}'
+}
+
+policy_apply() {
+	input="$1"
+	default_policy="$(printf '%s' "$input" | jq -r '.default_policy // "direct"')"
+	default_node_id="$(printf '%s' "$input" | jq -r '.default_node_id // ""')"
+	case "$default_policy" in direct|fixed_node|block) ;; *) json_error "Invalid default policy" ;; esac
+	if [ "$default_policy" = "fixed_node" ]; then
+		jq -e --arg id "$default_node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
+			json_error "Default node does not exist"
+	fi
+	uci set "proxyos.main.default_policy=${default_policy}"
+	uci set "proxyos.main.default_node_id=${default_node_id}"
+	uci commit proxyos
 	apply_generated_config
 	json_ok
+}
+
+backup_create() {
+	archive="/tmp/proxyos-backup.$$.tar.gz"
+	files="etc/proxyos etc/config/proxyos etc/config/network etc/config/dhcp etc/config/wireless etc/config/firewall"
+	(
+		cd /
+		existing=""
+		for path in $files; do [ -e "$path" ] && existing="${existing} ${path}"; done
+		# shellcheck disable=SC2086
+		tar -czf "$archive" $existing
+	)
+	encoded="$(base64 "$archive" | tr -d '\r\n')"
+	rm -f "$archive"
+	jq -n --arg filename "ProxyOS-backup-$(date +%Y%m%d-%H%M%S).tar.gz" --arg data "$encoded" \
+		'{ok:true,filename:$filename,data_base64:$data}'
+}
+
+backup_restore() {
+	input="$1"
+	encoded="$(printf '%s' "$input" | jq -r '.data_base64 // empty')"
+	[ -n "$encoded" ] || json_error "Backup data is required"
+	archive="/tmp/proxyos-restore.$$.tar.gz"
+	restore_dir="/tmp/proxyos-restore.$$"
+	printf '%s' "$encoded" | base64 -d > "$archive" 2>/dev/null || json_error "Backup is not valid Base64"
+	tar -tzf "$archive" > "${archive}.list" 2>/dev/null || json_error "Backup archive is invalid"
+	if grep -Eq '(^/|(^|/)\.\.(/|$))' "${archive}.list"; then
+		json_error "Backup archive contains unsafe paths"
+	fi
+	if grep -Ev '^(etc/proxyos(/|$)|etc/config/(proxyos|network|dhcp|wireless|firewall)$)' "${archive}.list" |
+		grep -q .; then
+		json_error "Backup archive contains unsupported files"
+	fi
+	mkdir -p "$restore_dir"
+	tar -xzf "$archive" -C "$restore_dir"
+	for config_name in proxyos network dhcp wireless firewall; do
+		[ ! -f "${restore_dir}/etc/config/${config_name}" ] ||
+			cp "${restore_dir}/etc/config/${config_name}" "/etc/config/${config_name}"
+	done
+	if [ -d "${restore_dir}/etc/proxyos" ]; then
+		for state_file in "${restore_dir}/etc/proxyos/"*.json; do
+			[ -f "$state_file" ] || continue
+			cp "$state_file" "$STATE_DIR/"
+		done
+	fi
+	rm -rf "$restore_dir"
+	rm -f "$archive" "${archive}.list"
+	apply_generated_config
+	json_ok "\"reboot_recommended\":true"
+}
+
+password_set() {
+	input="$1"
+	password="$(printf '%s' "$input" | jq -r '.password // empty')"
+	[ "${#password}" -ge 8 ] || json_error "Administrator password must contain at least 8 characters"
+	[ "${#password}" -le 128 ] || json_error "Administrator password is too long"
+	printf '%s\n%s\n' "$password" "$password" | passwd root >/dev/null 2>&1 ||
+		json_error "Administrator password could not be changed"
+	json_ok
+}
+
+system_logs() {
+	logs="$(logread -e proxyos 2>/dev/null | tail -n 120 || true)"
+	jq -n --arg text "$logs" '{items:($text | split("\n") | map(select(length > 0)))}'
+}
+
+system_reboot() {
+	json_ok
+	(sleep 2; reboot) >/dev/null 2>&1 &
 }
 
 require_commands
 ensure_state
 
 command_name="${1:-}"
-input="${2:-{}}"
+input="${2-}"
+[ -n "$input" ] || input='{}'
 case "$command_name" in
 	status) status ;;
 	devices) devices ;;
 	nodes) nodes ;;
+	node-get) node_get "$input" ;;
 	node-add) node_add "$input" ;;
+	node-update) node_update "$input" ;;
 	node-delete) node_delete "$input" ;;
+	node-test) node_test "$input" ;;
+	health-check) health_check ;;
+	egress-check) egress_check "$input" ;;
 	device-bind) device_bind "$input" ;;
 	wifi-status) wifi_status ;;
+	wifi-config) wifi_config ;;
 	wifi-toggle) wifi_toggle "$input" ;;
+	wifi-apply) wifi_apply "$input" ;;
+	wifi-disconnect) wifi_disconnect "$input" ;;
 	ports) ports ;;
 	ports-apply) ports_apply "$input" ;;
 	ports-confirm) ports_confirm ;;
 	subscriptions) subscriptions ;;
 	subscription-add) subscription_add "$input" ;;
 	subscription-update) subscription_update "$input" ;;
+	subscription-delete) subscription_delete "$input" ;;
+	policy-settings) policy_settings ;;
+	policy-apply) policy_apply "$input" ;;
+	backup-create) backup_create ;;
+	backup-restore) backup_restore "$input" ;;
+	password-set) password_set "$input" ;;
+	system-logs) system_logs ;;
+	system-reboot) system_reboot ;;
 	generate)
 		candidate="$(generate_config)"
 		mv "$candidate" "$ACTIVE_CONFIG"

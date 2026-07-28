@@ -7,9 +7,15 @@
           "status",
           "devices",
           "nodes",
+          "node_get",
           "wifi_status",
+          "wifi_config",
           "ports",
-          "subscriptions"
+          "subscriptions",
+          "egress_check",
+          "policy_settings",
+          "backup_create",
+          "system_logs"
         ]
       }
     },
@@ -17,13 +23,23 @@
       "ubus": {
         "proxyos": [
           "node_add",
+          "node_update",
           "node_delete",
+          "node_test",
+          "health_check",
           "device_bind",
           "wifi_toggle",
+          "wifi_apply",
+          "wifi_disconnect",
           "ports_apply",
           "ports_confirm",
           "subscription_add",
           "subscription_update",
+          "subscription_delete",
+          "policy_apply",
+          "backup_restore",
+          "password_set",
+          "system_reboot",
           "generate",
           "apply"
         ]
@@ -31,4 +47,3 @@
     }
   }
 }
-
