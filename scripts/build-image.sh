@@ -39,7 +39,7 @@ echo "[2/5] Verifying official OpenWrt checksum"
 curl --fail --location --retry 3 \
   "${BASE_URL}/sha256sums" \
   --output "${WORK_DIR}/sha256sums"
-EXPECTED_LINE="$(grep " ${ARCHIVE}\$" "${WORK_DIR}/sha256sums" || true)"
+EXPECTED_LINE="$(grep -F " *${ARCHIVE}" "${WORK_DIR}/sha256sums" || true)"
 if [[ -z "${EXPECTED_LINE}" ]]; then
   echo "The official checksum list does not contain ${ARCHIVE}" >&2
   exit 1
