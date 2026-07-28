@@ -614,7 +614,8 @@ function protocolOutbound() {
   const outbound = { type: protocol, server, server_port: serverPort };
   if (protocol === "vless") outbound.uuid = identity;
   if (protocol === "vmess") Object.assign(outbound, { uuid: identity, security: "auto" });
-  if (["trojan", "hysteria", "hysteria2", "anytls"].includes(protocol)) outbound.password = secret;
+  if (["trojan", "hysteria2", "anytls"].includes(protocol)) outbound.password = secret;
+  if (protocol === "hysteria") Object.assign(outbound, { auth_str: secret, up_mbps: 100, down_mbps: 100 });
   if (protocol === "tuic") Object.assign(outbound, { uuid: identity, password: secret });
   if (protocol === "shadowsocks") Object.assign(outbound, { method: identity || "2022-blake3-aes-128-gcm", password: secret });
   if (["socks", "http", "ssh"].includes(protocol)) {

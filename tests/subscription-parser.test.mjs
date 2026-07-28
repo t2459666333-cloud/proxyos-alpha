@@ -57,7 +57,8 @@ test("parses plain multi-protocol share-link subscriptions", () => {
     "hysteria",
     "socks",
   ]);
-  assert.equal(result.nodes[1].outbound.password, "password");
+  assert.equal(result.nodes[1].outbound.auth_str, "password");
+  assert.equal(result.nodes[1].outbound.up_mbps, 100);
 });
 
 test("parses Clash proxy objects", () => {

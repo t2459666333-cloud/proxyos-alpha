@@ -310,11 +310,17 @@ node_add() {
 		--argjson outbound "$canonical" \
 		'{id:$id,name:$name,source_type:"manual",source_id:"",enabled:true,outbound:$outbound}')"
 
+	nodes_rollback="${NODES_FILE}.rollback.$$"
+	cp "$NODES_FILE" "$nodes_rollback"
 	tmp_file="${NODES_FILE}.tmp.$$"
 	jq --arg id "$node_id" --argjson node "$node_json" \
 		'map(select(.id != $id)) + [$node]' "$NODES_FILE" > "$tmp_file"
 	mv "$tmp_file" "$NODES_FILE"
-	apply_generated_config
+	if ! apply_generated_config_raw; then
+		mv "$nodes_rollback" "$NODES_FILE"
+		json_error "$APPLY_ERROR"
+	fi
+	rm -f "$nodes_rollback"
 	json_ok "\"id\":\"${node_id}\""
 }
 
@@ -333,6 +339,8 @@ node_update() {
 	' >/dev/null 2>&1 || json_error "outbound_json must be a valid proxy outbound object"
 	canonical="$(printf '%s' "$outbound_json" | jq -Sc 'del(.tag)')"
 	validate_proxy_outbound "$canonical"
+	nodes_rollback="${NODES_FILE}.rollback.$$"
+	cp "$NODES_FILE" "$nodes_rollback"
 	tmp_file="${NODES_FILE}.tmp.$$"
 	jq --arg id "$node_id" --arg name "$name" --argjson outbound "$canonical" '
 		map(if .id == $id then
@@ -343,7 +351,11 @@ node_update() {
 		else . end)
 	' "$NODES_FILE" > "$tmp_file"
 	mv "$tmp_file" "$NODES_FILE"
-	apply_generated_config
+	if ! apply_generated_config_raw; then
+		mv "$nodes_rollback" "$NODES_FILE"
+		json_error "$APPLY_ERROR"
+	fi
+	rm -f "$nodes_rollback"
 	json_ok
 }
 
@@ -351,6 +363,10 @@ node_delete() {
 	input="$1"
 	node_id="$(printf '%s' "$input" | jq -r '.id // empty')"
 	[ -n "$node_id" ] || json_error "Node id is required"
+	nodes_rollback="${NODES_FILE}.rollback.$$"
+	devices_rollback="${DEVICES_FILE}.rollback.$$"
+	cp "$NODES_FILE" "$nodes_rollback"
+	cp "$DEVICES_FILE" "$devices_rollback"
 	tmp_file="${NODES_FILE}.tmp.$$"
 	jq --arg id "$node_id" 'map(select(.id != $id))' "$NODES_FILE" > "$tmp_file"
 	mv "$tmp_file" "$NODES_FILE"
@@ -366,7 +382,12 @@ node_delete() {
 		)' \
 		"$DEVICES_FILE" > "$tmp_file"
 	mv "$tmp_file" "$DEVICES_FILE"
-	apply_generated_config
+	if ! apply_generated_config_raw; then
+		mv "$nodes_rollback" "$NODES_FILE"
+		mv "$devices_rollback" "$DEVICES_FILE"
+		json_error "$APPLY_ERROR"
+	fi
+	rm -f "$nodes_rollback" "$devices_rollback"
 	json_ok
 }
 
@@ -466,10 +487,18 @@ node_test() {
 	[ -n "$node_id" ] || json_error "Node id is required"
 	jq -e --arg id "$node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
 		json_error "Node not found"
+	old_status="$(jq -r --arg id "$node_id" '.[] | select(.id == $id) | .status // "unknown"' "$NODES_FILE")"
+	nodes_rollback="${NODES_FILE}.rollback.$$"
+	cp "$NODES_FILE" "$nodes_rollback"
 	result="$(probe_node_egress "$node_id")"
 	status="${result%%|*}"
 	latency="${result#*|}"
 	save_probe "$node_id" "$status" "$latency"
+	if [ "$status" != "$old_status" ] && ! apply_generated_config_raw; then
+		mv "$nodes_rollback" "$NODES_FILE"
+		json_error "$APPLY_ERROR"
+	fi
+	rm -f "$nodes_rollback"
 
 	if [ "$status" = "available" ]; then
 		jq -n --argjson latency "$latency" '{ok:true,status:"available",latency_ms:$latency}'
@@ -496,6 +525,8 @@ health_check() {
 		[ "$new_status" = "$old_status" ] || changed=true
 	done
 	acquire_mutation_lock
+	health_rollback="${NODES_FILE}.rollback.$$"
+	cp "$NODES_FILE" "$health_rollback"
 	health_tmp="${NODES_FILE}.health.$$"
 	jq --slurpfile updates "$health_updates" '
 		($updates | INDEX(.id)) as $by_id |
@@ -510,8 +541,12 @@ health_check() {
 	mv "$health_tmp" "$NODES_FILE"
 	rm -f "$health_snapshot" "$health_updates"
 	if [ "$changed" = true ]; then
-		apply_generated_config
+		if ! apply_generated_config_raw; then
+			mv "$health_rollback" "$NODES_FILE"
+			json_error "$APPLY_ERROR"
+		fi
 	fi
+	rm -f "$health_rollback"
 	json_ok "\"tested\":$(jq 'length' "$NODES_FILE")"
 }
 
@@ -656,10 +691,17 @@ device_bind() {
 			failure_mode:$failure,
 			auto_source:$source
 		}')"
+	devices_rollback="${DEVICES_FILE}.rollback.$$"
+	cp "$DEVICES_FILE" "$devices_rollback"
 	tmp_file="${DEVICES_FILE}.tmp.$$"
 	jq --arg mac "$mac" --argjson device "$device_json" \
 		'map(select(.mac != $mac)) + [$device]' "$DEVICES_FILE" > "$tmp_file"
 	mv "$tmp_file" "$DEVICES_FILE"
+	if ! apply_generated_config_raw; then
+		mv "$devices_rollback" "$DEVICES_FILE"
+		json_error "$APPLY_ERROR"
+	fi
+	rm -f "$devices_rollback"
 
 	existing_section="$(uci show dhcp 2>/dev/null |
 		sed -n "s/^\(dhcp\.[^.]*\)\.mac='${mac}'$/\1/p" | head -n 1)"
@@ -672,7 +714,6 @@ device_bind() {
 	uci commit dhcp
 	/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
 
-	apply_generated_config
 	json_ok
 }
 
@@ -842,7 +883,8 @@ restart_proxy_service() {
 	return 0
 }
 
-apply_generated_config() {
+apply_generated_config_raw() {
+	APPLY_ERROR=""
 	candidate="$(generate_config)"
 	check_log="/tmp/proxyos-singbox-check.$$.log"
 	if [ "${PROXYOS_SKIP_CONFIG_CHECK:-0}" != "1" ] &&
@@ -850,7 +892,8 @@ apply_generated_config() {
 		check_error="$(tail -n 1 "$check_log" 2>/dev/null || true)"
 		rm -f "$candidate"
 		rm -f "$check_log"
-		json_error "sing-box rejected the generated configuration: ${check_error}"
+		APPLY_ERROR="sing-box rejected the generated configuration: ${check_error}"
+		return 1
 	fi
 	rm -f "$check_log"
 
@@ -864,8 +907,16 @@ apply_generated_config() {
 			cp "$LAST_GOOD_CONFIG" "$ACTIVE_CONFIG"
 			restart_proxy_service || true
 		fi
-		json_error "Proxy restart failed; previous configuration was restored"
+		APPLY_ERROR="Proxy restart failed; previous configuration was restored"
+		return 1
 	}
+	return 0
+}
+
+apply_generated_config() {
+	if ! apply_generated_config_raw; then
+		json_error "$APPLY_ERROR"
+	fi
 }
 
 wifi_toggle() {
@@ -1204,13 +1255,22 @@ subscription_delete() {
 	[ -n "$sub_id" ] || json_error "Subscription id is required"
 	jq -e --arg id "$sub_id" 'any(.[]; .id == $id)' "$SUBSCRIPTIONS_FILE" >/dev/null ||
 		json_error "Subscription not found"
+	subscriptions_rollback="${SUBSCRIPTIONS_FILE}.rollback.$$"
+	nodes_rollback="${NODES_FILE}.rollback.$$"
+	cp "$SUBSCRIPTIONS_FILE" "$subscriptions_rollback"
+	cp "$NODES_FILE" "$nodes_rollback"
 	subscriptions_tmp="${SUBSCRIPTIONS_FILE}.tmp.$$"
 	nodes_tmp="${NODES_FILE}.tmp.$$"
 	jq --arg id "$sub_id" 'map(select(.id != $id))' "$SUBSCRIPTIONS_FILE" > "$subscriptions_tmp"
 	mv "$subscriptions_tmp" "$SUBSCRIPTIONS_FILE"
 	jq --arg id "$sub_id" 'map(select(.source_id != $id))' "$NODES_FILE" > "$nodes_tmp"
 	mv "$nodes_tmp" "$NODES_FILE"
-	apply_generated_config
+	if ! apply_generated_config_raw; then
+		mv "$subscriptions_rollback" "$SUBSCRIPTIONS_FILE"
+		mv "$nodes_rollback" "$NODES_FILE"
+		json_error "$APPLY_ERROR"
+	fi
+	rm -f "$subscriptions_rollback" "$nodes_rollback"
 	json_ok
 }
 
@@ -1273,6 +1333,10 @@ subscription_update() {
 		json_error "Subscription contains an unsupported or invalid node: ${error_text}"
 	fi
 	rm -f "$staged_config" "$staged_log"
+	nodes_rollback="${NODES_FILE}.rollback.$$"
+	subscriptions_rollback="${SUBSCRIPTIONS_FILE}.rollback.$$"
+	cp "$NODES_FILE" "$nodes_rollback"
+	cp "$SUBSCRIPTIONS_FILE" "$subscriptions_rollback"
 	mv "$tmp_file" "$NODES_FILE"
 	now="$(date +%s)"
 	tmp_file="${SUBSCRIPTIONS_FILE}.tmp.$$"
@@ -1287,7 +1351,12 @@ subscription_update() {
 		"$SUBSCRIPTIONS_FILE" > "$tmp_file"
 	mv "$tmp_file" "$SUBSCRIPTIONS_FILE"
 	rm -f "$download" "$parsed" "$parser_error"
-	apply_generated_config
+	if ! apply_generated_config_raw; then
+		mv "$nodes_rollback" "$NODES_FILE"
+		mv "$subscriptions_rollback" "$SUBSCRIPTIONS_FILE"
+		json_error "$APPLY_ERROR"
+	fi
+	rm -f "$nodes_rollback" "$subscriptions_rollback"
 	json_ok "\"format\":$(printf '%s' "$format" | jq -Rs .),\"node_count\":${node_count}"
 }
 
@@ -1307,10 +1376,17 @@ policy_apply() {
 		jq -e --arg id "$default_node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
 			json_error "Default node does not exist"
 	fi
+	old_default_policy="$(uci -q get proxyos.main.default_policy || printf 'direct')"
+	old_default_node_id="$(uci -q get proxyos.main.default_node_id || true)"
 	uci set "proxyos.main.default_policy=${default_policy}"
 	uci set "proxyos.main.default_node_id=${default_node_id}"
 	uci commit proxyos
-	apply_generated_config
+	if ! apply_generated_config_raw; then
+		uci set "proxyos.main.default_policy=${old_default_policy}"
+		uci set "proxyos.main.default_node_id=${old_default_node_id}"
+		uci commit proxyos
+		json_error "$APPLY_ERROR"
+	fi
 	json_ok
 }
 
@@ -1338,6 +1414,7 @@ backup_restore() {
 	[ -n "$encoded" ] || json_error "Backup data is required"
 	archive="/tmp/proxyos-restore.$$.tar.gz"
 	restore_dir="/tmp/proxyos-restore.$$"
+	rollback_dir="/tmp/proxyos-restore-rollback.$$"
 	printf '%s' "$encoded" | base64 -d > "$archive" 2>/dev/null || json_error "Backup is not valid Base64"
 	tar -tzf "$archive" > "${archive}.list" 2>/dev/null || json_error "Backup archive is invalid"
 	if grep -Eq '(^/|(^|/)\.\.(/|$))' "${archive}.list"; then
@@ -1349,6 +1426,15 @@ backup_restore() {
 	fi
 	mkdir -p "$restore_dir"
 	tar -xzf "$archive" -C "$restore_dir"
+	mkdir -p "${rollback_dir}/etc/config" "${rollback_dir}/etc/proxyos"
+	for config_name in proxyos network dhcp wireless firewall; do
+		[ ! -f "/etc/config/${config_name}" ] ||
+			cp "/etc/config/${config_name}" "${rollback_dir}/etc/config/${config_name}"
+	done
+	for current_state in "$STATE_DIR"/*.json; do
+		[ -f "$current_state" ] || continue
+		cp "$current_state" "${rollback_dir}/etc/proxyos/"
+	done
 	for config_name in proxyos network dhcp wireless firewall; do
 		[ ! -f "${restore_dir}/etc/config/${config_name}" ] ||
 			cp "${restore_dir}/etc/config/${config_name}" "/etc/config/${config_name}"
@@ -1361,7 +1447,20 @@ backup_restore() {
 	fi
 	rm -rf "$restore_dir"
 	rm -f "$archive" "${archive}.list"
-	apply_generated_config
+	if ! apply_generated_config_raw; then
+		for config_name in proxyos network dhcp wireless firewall; do
+			[ ! -f "${rollback_dir}/etc/config/${config_name}" ] ||
+				cp "${rollback_dir}/etc/config/${config_name}" "/etc/config/${config_name}"
+		done
+		rm -f "$STATE_DIR"/*.json
+		for previous_state in "${rollback_dir}/etc/proxyos/"*.json; do
+			[ -f "$previous_state" ] || continue
+			cp "$previous_state" "$STATE_DIR/"
+		done
+		rm -rf "$rollback_dir"
+		json_error "$APPLY_ERROR"
+	fi
+	rm -rf "$rollback_dir"
 	json_ok "\"reboot_recommended\":true"
 }
 
@@ -1435,7 +1534,7 @@ require_commands
 ensure_state
 
 case "$command_name" in
-	node-add|node-update|node-delete|node-test|device-bind|wifi-toggle|wifi-apply|wifi-disconnect|ports-apply|ports-confirm|subscription-add|subscription-update|subscription-delete|policy-apply|backup-restore|password-set|system-reboot|generate|apply)
+	node-add|node-update|node-delete|node-test|device-bind|wifi-toggle|wifi-apply|wifi-disconnect|ports-apply|ports-confirm|subscription-add|subscription-update|subscription-delete|policy-apply|backup-restore|password-set|system-reboot|apply)
 		acquire_mutation_lock
 		;;
 esac

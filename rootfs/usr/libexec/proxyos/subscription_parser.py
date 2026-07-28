@@ -57,6 +57,11 @@ def truthy(value: Any) -> bool:
     return str(value).lower() in {"1", "true", "yes", "on", "tls"}
 
 
+def integer_value(value: Any, default: int = 0) -> int:
+    match = re.search(r"\d+", str(value or ""))
+    return int(match.group(0)) if match else default
+
+
 def compact(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: compact(item) for key, item in value.items() if item not in (None, "", [], {})}
@@ -198,8 +203,12 @@ def parse_standard_uri(link: str) -> tuple[str, dict[str, Any]]:
             flow = query_first(query, "flow")
             if flow:
                 outbound["flow"] = flow
-    elif outbound_type in {"trojan", "hysteria", "hysteria2", "anytls"}:
+    elif outbound_type in {"trojan", "hysteria2", "anytls"}:
         outbound["password"] = username or password or query_first(query, "auth")
+    elif outbound_type == "hysteria":
+        outbound["auth_str"] = username or password or query_first(query, "auth")
+        outbound["up_mbps"] = integer_value(query_first(query, "up_mbps", "up"), 100)
+        outbound["down_mbps"] = integer_value(query_first(query, "down_mbps", "down"), 100)
     elif outbound_type == "tuic":
         outbound["uuid"] = username
         outbound["password"] = password
@@ -274,8 +283,12 @@ def clash_proxy_to_outbound(proxy: dict[str, Any]) -> tuple[str, dict[str, Any]]
             outbound["alter_id"] = int(proxy.get("alterId") or proxy.get("alter-id") or 0)
         elif proxy.get("flow"):
             outbound["flow"] = proxy.get("flow")
-    elif outbound_type in {"trojan", "hysteria2", "hysteria", "anytls"}:
+    elif outbound_type in {"trojan", "hysteria2", "anytls"}:
         outbound["password"] = proxy.get("password") or proxy.get("auth") or proxy.get("auth-str")
+    elif outbound_type == "hysteria":
+        outbound["auth_str"] = proxy.get("auth-str") or proxy.get("auth") or proxy.get("password")
+        outbound["up_mbps"] = integer_value(proxy.get("up") or proxy.get("up-speed"), 100)
+        outbound["down_mbps"] = integer_value(proxy.get("down") or proxy.get("down-speed"), 100)
     elif outbound_type == "tuic":
         outbound.update(
             {
