@@ -147,6 +147,10 @@ async function handleRpc(request, response) {
       data = { ok: true };
     } else if (method === "system_logs") {
       data = { items: ["proxyos: configuration loaded", "proxyos: sing-box is running"] };
+    } else if (method === "egress_check") {
+      data = { ok: true, ip: "203.0.113.10", mode: "node", blocked: false };
+    } else if (method === "update_check") {
+      data = { ok: true, current_version: "0.2.1-alpha", latest_version: "0.2.1-alpha", available: false };
     } else if (method === "backup_create") {
       data = { ok: true, filename: "ProxyOS-backup-preview.tar.gz", data_base64: "H4sIAAAAAAACAAMAAAAAAAAAAA==" };
     } else {

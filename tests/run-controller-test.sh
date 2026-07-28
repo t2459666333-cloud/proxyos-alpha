@@ -13,6 +13,7 @@ cp "${PROJECT_DIR}/rootfs/etc/proxyos/subscriptions.json" "${STATE_DIR}/subscrip
 chmod 0755 \
   "${PROJECT_DIR}/tests/mocks/uci" \
   "${PROJECT_DIR}/tests/mocks/ubus" \
+  "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" \
   "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/subscription_parser.py"
 export PATH="${PROJECT_DIR}/.tools-cache:${PROJECT_DIR}/tests/mocks:${PATH}"
 export PYTHONPATH="${PROJECT_DIR}/.tools-cache/python${PYTHONPATH:+:${PYTHONPATH}}"
