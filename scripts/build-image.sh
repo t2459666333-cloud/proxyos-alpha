@@ -79,9 +79,17 @@ PACKAGES=(
   "kmod-igc"
   "kmod-e1000e"
   "kmod-r8169"
+  "kmod-r8125"
   "kmod-ixgbe"
   "kmod-i40e"
   "kmod-vmxnet3"
+  "kmod-iwlwifi"
+  "iwlwifi-firmware-ax200"
+  "iwlwifi-firmware-ax201"
+  "iwlwifi-firmware-ax210"
+  "kmod-mt7921e"
+  "kmod-mt7921u"
+  "kmod-ath9k"
 )
 
 echo "[4/5] Building ProxyOS images"
