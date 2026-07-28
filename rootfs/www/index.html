@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light" />
     <title>ProxyOS</title>
     <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.2.0" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.2.1" />
   </head>
   <body>
     <div id="toast" class="toast" aria-live="polite"></div>
@@ -43,7 +43,7 @@
             <div><dt>系统版本</dt><dd id="sidebar-version">—</dd></div>
             <div><dt>内核版本</dt><dd id="sidebar-kernel">—</dd></div>
           </dl>
-          <button class="sidebar-update refresh-button"><span class="icon" data-icon="refresh"></span>检查更新</button>
+          <button id="check-update" class="sidebar-update"><span class="icon" data-icon="refresh"></span>检查更新</button>
           <button id="logout-button" class="sidebar-logout">退出登录</button>
         </div>
       </aside>
@@ -183,8 +183,8 @@
               <h2>安全与维护</h2>
               <div class="settings-row"><span>管理员密码</span><strong class="danger-text">首次启动请立即设置</strong></div>
               <div class="settings-row"><span>SSH 管理</span><strong>root@192.168.10.1</strong></div>
-              <div class="settings-row"><span>配置备份</span><strong>即将支持</strong></div>
-              <p class="settings-help">当前测试版请通过 SSH 执行 <code>passwd</code> 设置密码。</p>
+              <div class="settings-row"><span>配置备份</span><strong>已启用</strong></div>
+              <p class="settings-help">可在下方下载或恢复配置；修改密码后需要重新登录。</p>
             </article>
           </div>
         </section>
@@ -251,6 +251,6 @@
       </section>
     </div>
 
-    <script src="/assets/app.js?v=0.2.0" type="module"></script>
+    <script src="/assets/app.js?v=0.2.1" type="module"></script>
   </body>
 </html>

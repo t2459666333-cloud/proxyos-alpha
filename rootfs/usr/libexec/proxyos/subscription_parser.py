@@ -20,6 +20,7 @@ SUPPORTED_LINK_SCHEMES = {
     "vmess",
     "vless",
     "trojan",
+    "hysteria",
     "hysteria2",
     "hy2",
     "tuic",
@@ -197,7 +198,7 @@ def parse_standard_uri(link: str) -> tuple[str, dict[str, Any]]:
             flow = query_first(query, "flow")
             if flow:
                 outbound["flow"] = flow
-    elif outbound_type in {"trojan", "hysteria2", "anytls"}:
+    elif outbound_type in {"trojan", "hysteria", "hysteria2", "anytls"}:
         outbound["password"] = username or password or query_first(query, "auth")
     elif outbound_type == "tuic":
         outbound["uuid"] = username

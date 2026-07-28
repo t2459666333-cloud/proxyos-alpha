@@ -7,7 +7,7 @@ const port = Number(process.env.PORT || 4173);
 
 const mock = {
   status: {
-    version: "0.2.0-alpha",
+    version: "0.2.1-alpha",
     hostname: "ProxyOS",
     model: "Intel N100 · x86-64",
     kernel: "6.12.74",

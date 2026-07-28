@@ -113,8 +113,8 @@ if [[ -z "${EFI_SOURCE}" || -z "${BIOS_SOURCE}" ]]; then
   exit 1
 fi
 
-cp "${EFI_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-Alpha0.2.0-x86_64-UEFI.img.gz"
-cp "${BIOS_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-Alpha0.2.0-x86_64-BIOS.img.gz"
+cp "${EFI_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-Alpha0.2.1-x86_64-UEFI.img.gz"
+cp "${BIOS_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-Alpha0.2.1-x86_64-BIOS.img.gz"
 (
   cd "${DIST_DIR}"
   sha256sum ./*.img.gz > SHA256SUMS

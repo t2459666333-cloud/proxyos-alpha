@@ -17,6 +17,8 @@ const state = {
   nodeSource: "all",
   nodeHealth: "all",
   rollbackTimer: null,
+  refreshTimer: null,
+  loading: false,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -92,12 +94,23 @@ function showToast(message, error = false) {
   showToast.timer = setTimeout(() => toast.classList.remove("is-visible"), 3200);
 }
 
-async function ubusCall(object, method, payload = {}, session = state.session) {
-  const response = await fetch("/ubus", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "call", params: [session || ZERO_SESSION, object, method, payload] }),
-  });
+async function ubusCall(object, method, payload = {}, session = state.session, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch("/ubus", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "call", params: [session || ZERO_SESSION, object, method, payload] }),
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("管理接口响应超时");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!response.ok) throw new Error(`管理接口返回 ${response.status}`);
   const envelope = await response.json();
   if (envelope.error) throw new Error(envelope.error.message || "RPC 请求失败");
@@ -110,7 +123,8 @@ async function ubusCall(object, method, payload = {}, session = state.session) {
   return data ?? {};
 }
 
-const api = (method, payload = {}) => ubusCall("proxyos", method, payload);
+const api = (method, payload = {}) =>
+  ubusCall("proxyos", method, payload, state.session, method === "subscription_update" ? 45000 : 15000);
 const unwrapItems = (value) => (Array.isArray(value?.items) ? value.items : Array.isArray(value) ? value : []);
 
 async function login(username, password) {
@@ -121,10 +135,12 @@ async function login(username, password) {
   $("#login-screen").classList.add("is-hidden");
   $("#app-shell").classList.remove("is-hidden");
   await loadAll({ quiet: true });
+  startRefreshLoop();
 }
 
 function logout() {
   state.session = "";
+  state.loading = false;
   sessionStorage.removeItem("proxyos_session");
   $("#app-shell").classList.add("is-hidden");
   $("#login-screen").classList.remove("is-hidden");
@@ -132,6 +148,8 @@ function logout() {
 }
 
 async function loadAll({ quiet = false } = {}) {
+  if (state.loading) return;
+  state.loading = true;
   const requests = [
     ["status", "status"],
     ["devices", "devices"],
@@ -142,7 +160,16 @@ async function loadAll({ quiet = false } = {}) {
     ["subscriptions", "subscriptions"],
     ["policy", "policy_settings"],
   ];
-  const results = await Promise.allSettled(requests.map(([, method]) => api(method)));
+  // rpcd launches one controller process per method. Serial reads avoid
+  // exhausting a small router and make each refresh deterministic.
+  const results = [];
+  for (const [, method] of requests) {
+    try {
+      results.push({ status: "fulfilled", value: await api(method) });
+    } catch (reason) {
+      results.push({ status: "rejected", reason });
+    }
+  }
   let hadError = false;
   results.forEach((result, index) => {
     const [key] = requests[index];
@@ -154,7 +181,15 @@ async function loadAll({ quiet = false } = {}) {
     }
   });
   renderAll();
+  state.loading = false;
   if (!quiet) showToast(hadError ? "部分状态读取失败" : "状态已更新", hadError);
+}
+
+function startRefreshLoop() {
+  if (state.refreshTimer) return;
+  state.refreshTimer = setInterval(() => {
+    if (state.session) loadAll({ quiet: true });
+  }, 15000);
 }
 
 function nodeFor(device) { return state.nodes.find((node) => node.id === device.node_id); }
@@ -364,11 +399,11 @@ function renderNodes() {
 
 function renderSubscriptions() {
   $("#subscription-grid").innerHTML = state.subscriptions.length ? state.subscriptions.map((subscription) => `
-    <article class="panel subscription-card">
+    <article class="panel subscription-card" title="${escapeHtml(subscription.error || "")}">
       <div class="subscription-card-head"><span class="source-pill">${escapeHtml((subscription.format || "自动识别").toUpperCase())}</span><button class="more-button delete-subscription" data-id="${escapeHtml(subscription.id)}">⋮</button></div>
       <h3>${escapeHtml(subscription.name)}</h3>
       <p>${Number(subscription.node_count || 0)} 个节点 · 最后更新：${escapeHtml(formatTime(subscription.last_update))}</p>
-      <div class="subscription-foot"><span class="status-badge ${subscription.status === "ok" ? "online" : "offline"}">${subscription.status === "ok" ? "正常" : "等待更新"}</span><button class="button button-soft update-subscription" data-id="${escapeHtml(subscription.id)}">立即更新</button></div>
+      <div class="subscription-foot"><span class="status-badge ${subscription.status === "ok" ? "online" : "offline"}">${subscription.status === "ok" ? "正常" : subscription.status === "error" ? "更新失败" : "等待更新"}</span><button class="button button-soft update-subscription" data-id="${escapeHtml(subscription.id)}">立即更新</button></div>
     </article>`).join("") : `<article class="panel empty-state">还没有订阅，可添加 Clash YAML、Base64、分享链接或 sing-box JSON 订阅。</article>`;
   $$(".update-subscription").forEach((button) => button.addEventListener("click", () => updateSubscription(button)));
   $$(".delete-subscription").forEach((button) => button.addEventListener("click", () => deleteSubscription(button.dataset.id)));
@@ -449,13 +484,13 @@ function renderPolicies() {
 
 function renderSystem() {
   const healthy = Boolean(state.status.singbox_running);
-  $("#system-version").textContent = state.status.version || "0.2.0-alpha";
+  $("#system-version").textContent = state.status.version || "0.2.1-alpha";
   $("#system-model").textContent = state.status.model || "x86-64";
   $("#system-kernel").textContent = state.status.kernel || "—";
   $("#system-core").textContent = healthy ? "运行正常" : "未运行";
   $("#sidebar-core-text").textContent = healthy ? "系统运行正常" : "代理核心异常";
   $("#sidebar-uptime").textContent = formatUptime(state.status.uptime);
-  $("#sidebar-version").textContent = state.status.version || "0.2.0-alpha";
+  $("#sidebar-version").textContent = state.status.version || "0.2.1-alpha";
   $("#sidebar-kernel").textContent = state.status.kernel || "—";
   ["#global-health", "#system-health-pill"].forEach((selector) => {
     const pill = $(selector);
@@ -699,6 +734,7 @@ async function toggleWifi(event) {
     state.wifi = await api("wifi_status");
     renderDashboard(); renderWifi(); showToast(state.wifi.enabled ? "Wi‑Fi 已开启" : "Wi‑Fi 已关闭");
   } catch (error) { showToast(error.message, true); }
+  finally { if (button.isConnected) button.disabled = false; }
 }
 
 async function saveWifiSettings(event) {
@@ -740,11 +776,11 @@ async function checkEgress(mac) {
   const device = state.devices.find((item) => item.mac === mac);
   if (!device) return;
   try {
-    const automatic = state.nodes
-      .filter((node) => node.status !== "error" && (device.auto_source === "all" || !device.auto_source || node.source_type === device.auto_source))
-      .sort((a, b) => (a.latency_ms ?? 999999) - (b.latency_ms ?? 999999))[0];
-    const nodeId = device.policy === "fixed_node" ? device.node_id : device.policy === "auto_node" ? automatic?.id || "" : "";
-    const result = await api("egress_check", { node_id: nodeId });
+    const result = await api("egress_check", { device_mac: mac });
+    if (result.blocked) {
+      showToast(`${device.name || "设备"} 当前策略为断网保护，没有公网出口`);
+      return;
+    }
     showToast(result.ip ? `${device.name || "设备"} 出口 IP：${result.ip}` : "出口检测未获得公网 IP", !result.ip);
   } catch (error) { showToast(`出口检测失败：${error.message}`, true); }
 }
@@ -779,6 +815,7 @@ async function createBackup() {
   button.disabled = true;
   try {
     const result = await api("backup_create");
+    if (!result.data_base64) throw new Error("备份数据为空，未下载文件");
     downloadBase64(result.filename, result.data_base64);
     showToast("配置备份已生成");
   } catch (error) { showToast(error.message, true); }
@@ -824,6 +861,23 @@ async function showSystemLogs() {
     output.textContent = (result.items || []).join("\n") || "暂无 ProxyOS 日志";
     output.classList.toggle("is-hidden");
   } catch (error) { showToast(error.message, true); }
+}
+
+async function checkForUpdates(event) {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const result = await api("update_check");
+    showToast(
+      result.available
+        ? `发现新版本 ${result.latest_version}，请在发布页下载已签名镜像`
+        : `当前 ${result.current_version} 已是最新版本`,
+    );
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function rebootSystem() {
@@ -901,6 +955,7 @@ function bindEvents() {
     finally { button.disabled = false; button.textContent = "登录 ProxyOS"; }
   });
   $("#logout-button").addEventListener("click", logout);
+  $("#check-update").addEventListener("click", checkForUpdates);
   $("#mobile-menu-button").addEventListener("click", () => $(".sidebar").classList.toggle("is-open"));
   $$(".nav-item").forEach((button) => button.addEventListener("click", () => setPage(button.dataset.page)));
   $$(".refresh-button").forEach((button) => button.addEventListener("click", () => loadAll()));
@@ -976,7 +1031,7 @@ async function bootstrap() {
   $("#login-screen").classList.add("is-hidden");
   $("#app-shell").classList.remove("is-hidden");
   try { await loadAll({ quiet: true }); } catch { logout(); }
-  setInterval(() => { if (state.session) loadAll({ quiet: true }); }, 15000);
+  startRefreshLoop();
 }
 
 bootstrap();

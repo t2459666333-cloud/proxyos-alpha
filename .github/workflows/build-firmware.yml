@@ -19,6 +19,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y build-essential curl zstd python3-yaml
       - name: Run project checks
         run: npm test && npm run check
+      - name: Run controller integration checks
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/SagerNet/sing-box/releases/download/v1.12.17/sing-box-1.12.17-linux-amd64.tar.gz \
+            --output /tmp/sing-box.tar.gz
+          tar -xzf /tmp/sing-box.tar.gz -C /tmp
+          PROXYOS_SINGBOX=/tmp/sing-box-1.12.17-linux-amd64/sing-box \
+            bash ./tests/run-controller-test.sh
       - name: Build images
         run: bash ./scripts/build-image.sh
       - uses: actions/upload-artifact@v4

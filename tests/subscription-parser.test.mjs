@@ -45,6 +45,21 @@ test("parses Base64 share-link subscriptions", () => {
   assert.equal(result.nodes[1].outbound.password, "secret");
 });
 
+test("parses plain multi-protocol share-link subscriptions", () => {
+  const result = parsePayload("share-links", [
+    "ss://YWVzLTEyOC1nY206c2VjcmV0QGhrLmV4YW1wbGUuY29tOjgzODg=#Hong%20Kong%20SS",
+    "hysteria://password@hy.example.com:8443?security=tls&sni=hy.example.com#Hysteria",
+    "socks5://user:pass@socks.example.com:1080#SOCKS",
+  ].join("\n"));
+  assert.equal(result.format, "share-links");
+  assert.deepEqual(result.nodes.map((node) => node.outbound.type), [
+    "shadowsocks",
+    "hysteria",
+    "socks",
+  ]);
+  assert.equal(result.nodes[1].outbound.password, "password");
+});
+
 test("parses Clash proxy objects", () => {
   const result = parsePayload("clash-json", JSON.stringify({
     proxies: [{

@@ -1,4 +1,4 @@
-# ProxyOS Alpha 0.2.0
+# ProxyOS Alpha 0.2.1
 
 ProxyOS is an x86-64 OpenWrt derivative focused on one job: assigning an
 independent sing-box outbound to every LAN or Wi-Fi client.
@@ -6,7 +6,7 @@ independent sing-box outbound to every LAN or Wi-Fi client.
 This repository contains a reproducible OpenWrt ImageBuilder project. It does
 not contain a renamed stock image or a placeholder firmware file.
 
-## Alpha 0.2.0 scope
+## Alpha 0.2.1 scope
 
 - OpenWrt 25.12.5 x86-64, UEFI and legacy BIOS images
 - A custom responsive Web console

@@ -15,7 +15,7 @@ case "$1" in
   "node_delete": {"id":""},
   "node_test": {"id":""},
   "health_check": {},
-  "egress_check": {"node_id":""},
+  "egress_check": {"node_id":"", "device_mac":""},
   "device_bind": {"mac":"", "ip":"", "name":"", "policy":"", "node_id":"", "backup_node_id":"", "failure_mode":"", "auto_source":""},
   "wifi_status": {},
   "wifi_config": {},
@@ -35,6 +35,7 @@ case "$1" in
   "backup_restore": {"data_base64":""},
   "password_set": {"password":""},
   "system_logs": {},
+  "update_check": {},
   "system_reboot": {},
   "generate": {},
   "apply": {}
@@ -44,7 +45,7 @@ EOF
 	call)
 		read -r input
 		case "$2" in
-			status|devices|nodes|ports|ports_confirm|subscriptions|generate|apply|health_check|policy_settings|backup_create|system_logs|system_reboot)
+			status|devices|nodes|ports|ports_confirm|subscriptions|generate|apply|health_check|policy_settings|backup_create|system_logs|update_check|system_reboot)
 				exec "$CTL" "$(printf '%s' "$2" | tr '_' '-')" '{}'
 				;;
 			wifi_status)

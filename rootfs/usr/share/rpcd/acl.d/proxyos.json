@@ -15,7 +15,8 @@
           "egress_check",
           "policy_settings",
           "backup_create",
-          "system_logs"
+          "system_logs",
+          "update_check"
         ]
       }
     },
