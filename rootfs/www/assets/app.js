@@ -1220,9 +1220,9 @@ async function checkForUpdates(event) {
   try {
     const result = await api("update_check");
     showToast(
-      result.available
+      result.message || (result.available
         ? `发现新版本 ${result.latest_version}，请在发布页下载已签名镜像`
-        : `当前 ${result.current_version} 已是最新版本`,
+        : `当前 ${result.current_version} 已是最新版本`),
     );
   } catch (error) {
     showToast(error.message, true);

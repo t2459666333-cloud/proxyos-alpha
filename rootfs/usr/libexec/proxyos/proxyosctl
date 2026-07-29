@@ -1805,6 +1805,7 @@ system_logs() {
 update_check() {
 	current_version="$(proxyos_version)"
 	release_api="$(uci -q get proxyos.main.release_api || printf 'https://api.github.com/repos/t2459666333-cloud/proxyos-alpha/releases/latest')"
+	version_api="$(uci -q get proxyos.main.version_api || printf 'https://raw.githubusercontent.com/t2459666333-cloud/proxyos-alpha/main/VERSION')"
 	release_file="/tmp/proxyos-release.$$.json"
 	release_error="/tmp/proxyos-release.$$.error"
 	if ! curl --fail --silent --show-error --location \
@@ -1812,19 +1813,41 @@ update_check() {
 		--header "Accept: application/vnd.github+json" \
 		--user-agent "ProxyOS/${current_version}" \
 		"$release_api" -o "$release_file" 2>"$release_error"; then
-		error_text="$(tail -n 1 "$release_error" 2>/dev/null || printf 'update service unavailable')"
-		rm -f "$release_file" "$release_error"
-		json_error "Update check failed: ${error_text}"
+		# A new installation may be built before the first GitHub Release is
+		# published. Fall back to the repository VERSION file instead of
+		# showing a permanent 404 error in the system page.
+		if ! curl --fail --silent --show-error --location \
+			--connect-timeout 5 --max-time 12 \
+			--user-agent "ProxyOS/${current_version}" \
+			"$version_api" -o "$release_file" 2>"$release_error"; then
+			rm -f "$release_file" "$release_error"
+			jq -n --arg current "$current_version" '{
+				ok:true,
+				current_version:$current,
+				latest_version:$current,
+				available:false,
+				source_available:false,
+				release_url:"",
+				message:"当前没有可访问的公开更新源，系统仍可正常使用"
+			}'
+			return 0
+		fi
 	fi
-	latest_version="$(jq -r '.tag_name // .version // empty' "$release_file" | sed 's/^v//')"
-	release_url="$(jq -r '.html_url // .url // empty' "$release_file")"
+	if jq -e 'type == "object"' "$release_file" >/dev/null 2>&1; then
+		latest_version="$(jq -r '.tag_name // .version // empty' "$release_file" | sed 's/^v//')"
+		release_url="$(jq -r '.html_url // .url // empty' "$release_file")"
+	else
+		latest_version="$(sed -n '1{s/[[:space:]]//g;s/^v//;p;}' "$release_file")"
+		release_url="https://github.com/t2459666333-cloud/proxyos-alpha"
+	fi
 	rm -f "$release_file" "$release_error"
-	[ -n "$latest_version" ] || json_error "Update service returned no version"
+	printf '%s' "$latest_version" | grep -Eq '^[0-9][0-9A-Za-z.-]*$' ||
+		json_error "Update service returned no valid version"
 	available=false
 	[ "$latest_version" = "$current_version" ] || available=true
 	jq -n --arg current "$current_version" --arg latest "$latest_version" \
 		--arg url "$release_url" --argjson available "$available" \
-		'{ok:true,current_version:$current,latest_version:$latest,available:$available,release_url:$url}'
+		'{ok:true,current_version:$current,latest_version:$latest,available:$available,source_available:true,release_url:$url}'
 }
 
 system_reboot() {
