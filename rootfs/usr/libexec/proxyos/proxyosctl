@@ -16,7 +16,7 @@ PORT_ROLLBACK_CONFIG="/tmp/proxyos-network.rollback"
 VERSION_FILE="${STATE_DIR}/version"
 
 proxyos_version() {
-	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc1'
+	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc2'
 }
 
 json_error() {
@@ -79,7 +79,8 @@ ensure_state() {
 }
 
 physical_interfaces() {
-	for net_path in /sys/class/net/*; do
+	net_class_root="${PROXYOS_NET_CLASS_ROOT:-/sys/class/net}"
+	for net_path in "$net_class_root"/*; do
 		[ -e "$net_path" ] || continue
 		iface="${net_path##*/}"
 		case "$iface" in
@@ -100,11 +101,14 @@ wifi_status() {
 	phy_name=""
 	driver=""
 	reason="No AP-capable wireless adapter detected"
+	ieee80211_root="${PROXYOS_IEEE80211_ROOT:-/sys/class/ieee80211}"
+	iw_command="${PROXYOS_IW:-iw}"
+	ubus_command="${PROXYOS_UBUS:-ubus}"
 
-	for phy_path in /sys/class/ieee80211/*; do
+	for phy_path in "$ieee80211_root"/*; do
 		[ -e "$phy_path" ] || continue
 		candidate="${phy_path##*/}"
-		if iw phy "$candidate" info 2>/dev/null | grep -qE '^[[:space:]]+\*[[:space:]]+AP([[:space:]]|$)'; then
+		if "$iw_command" phy "$candidate" info 2>/dev/null | grep -qE '^[[:space:]]+\*[[:space:]]+AP([[:space:]]|$)'; then
 			available=true
 			phy_name="$candidate"
 			driver="$(basename "$(readlink -f "${phy_path}/device/driver" 2>/dev/null || true)")"
@@ -114,7 +118,7 @@ wifi_status() {
 	done
 
 	if [ "$available" = true ]; then
-		if ubus call network.wireless status 2>/dev/null | jq -e 'to_entries | any(.value.up == true)' >/dev/null 2>&1; then
+		if "$ubus_command" call network.wireless status 2>/dev/null | jq -e 'to_entries | any(.value.up == true)' >/dev/null 2>&1; then
 			enabled=true
 		fi
 	fi
@@ -484,7 +488,7 @@ probe_proxy_latency() {
 			--output /dev/null \
 			--proxy "$proxy_url" \
 			--connect-timeout 4 --max-time 10 \
-			--write-out '%{time_total}' \
+			--write-out '%{time_starttransfer}' \
 			"$endpoint" 2>/dev/null || true
 	)"
 	case "$probe_time" in
@@ -536,7 +540,7 @@ probe_node_egress() {
 	proxy_url="socks5h://127.0.0.1:${test_port}"
 	latency_domestic_file="/tmp/proxyos-latency-domestic.$$.txt"
 	latency_foreign_file="/tmp/proxyos-latency-foreign.$$.txt"
-	probe_proxy_latency "$proxy_url" "https://www.baidu.com/" > "$latency_domestic_file" &
+	probe_proxy_latency "$proxy_url" "https://www.baidu.com/favicon.ico" > "$latency_domestic_file" &
 	latency_domestic_pid="$!"
 	probe_proxy_latency "$proxy_url" "https://www.gstatic.com/generate_204" > "$latency_foreign_file" &
 	latency_foreign_pid="$!"
@@ -818,9 +822,11 @@ device_bind() {
 		jq -e --arg id "$node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
 			json_error "Selected node does not exist"
 		probe_result="$(probe_node_egress "$node_id")"
-		probe_status="${probe_result%%|*}"
-		probe_latency="${probe_result#*|}"
-		save_probe "$node_id" "$probe_status" "$probe_latency"
+		probe_status="$(printf '%s' "$probe_result" | cut -d '|' -f 1)"
+		probe_latency="$(printf '%s' "$probe_result" | cut -d '|' -f 2)"
+		probe_latency_domestic="$(printf '%s' "$probe_result" | cut -d '|' -f 3)"
+		probe_latency_foreign="$(printf '%s' "$probe_result" | cut -d '|' -f 4)"
+		save_probe "$node_id" "$probe_status" "$probe_latency" "$probe_latency_domestic" "$probe_latency_foreign"
 		[ "$probe_status" = "available" ] ||
 			json_error "所选节点无法建立真实代理出口，设备策略未更改"
 	fi
@@ -872,6 +878,68 @@ device_bind() {
 	fi
 
 	json_ok
+}
+
+devices_assign_node() {
+	input="$1"
+	node_id="$(printf '%s' "$input" | jq -r '.node_id // empty')"
+	device_macs="$(printf '%s' "$input" | jq -c '
+		[.device_macs[]? | ascii_upcase] | unique
+	')"
+	[ -n "$node_id" ] || json_error "Node id is required"
+	jq -e --arg id "$node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
+		json_error "Selected node does not exist"
+	printf '%s' "$device_macs" | jq -e 'type == "array" and length > 0' >/dev/null ||
+		json_error "Select at least one valid device"
+	for selected_mac in $(printf '%s' "$device_macs" | jq -r '.[]'); do
+		printf '%s' "$selected_mac" | grep -Eq '^([0-9A-F]{2}:){5}[0-9A-F]{2}$' ||
+			json_error "Select at least one valid device"
+	done
+	missing_count="$(jq -n \
+		--argjson selected "$device_macs" \
+		--slurpfile devices "$DEVICES_FILE" '
+			($devices[0] | map(.mac)) as $known |
+			[$selected[] as $mac | select(($known | index($mac)) == null) | $mac] |
+			length
+	')"
+	[ "$missing_count" -eq 0 ] || json_error "One or more selected devices no longer exist"
+
+	probe_result="$(probe_node_egress "$node_id")"
+	probe_status="$(printf '%s' "$probe_result" | cut -d '|' -f 1)"
+	probe_latency="$(printf '%s' "$probe_result" | cut -d '|' -f 2)"
+	probe_latency_domestic="$(printf '%s' "$probe_result" | cut -d '|' -f 3)"
+	probe_latency_foreign="$(printf '%s' "$probe_result" | cut -d '|' -f 4)"
+	save_probe "$node_id" "$probe_status" "$probe_latency" "$probe_latency_domestic" "$probe_latency_foreign"
+	[ "$probe_status" = "available" ] ||
+		json_error "所选节点无法建立真实代理出口，设备策略未更改"
+
+	devices_rollback="${DEVICES_FILE}.rollback.$$"
+	cp "$DEVICES_FILE" "$devices_rollback" ||
+		json_error "无法创建设备策略回滚文件，请检查系统存储"
+	tmp_file="${DEVICES_FILE}.tmp.$$"
+	jq --arg id "$node_id" --argjson selected "$device_macs" '
+		map(
+			. as $device |
+			if ($selected | index($device.mac)) != null then
+				.policy="fixed_node" |
+				.node_id=$id |
+				.backup_node_id=(.backup_node_id // "") |
+				.failure_mode=(.failure_mode // "block") |
+				.auto_source=(.auto_source // "all")
+			else . end
+		)
+	' "$DEVICES_FILE" > "$tmp_file" ||
+		json_error "无法生成批量设备策略，请检查系统存储"
+	mv "$tmp_file" "$DEVICES_FILE" ||
+		json_error "无法保存批量设备策略，请检查启动盘或 Overlay 文件系统"
+	if ! apply_generated_config_raw; then
+		mv "$devices_rollback" "$DEVICES_FILE"
+		json_error "$APPLY_ERROR"
+	fi
+	rm -f "$devices_rollback"
+	assigned_count="$(printf '%s' "$device_macs" | jq 'length')"
+	jq -n --argjson assigned_count "$assigned_count" \
+		'{ok:true,assigned_count:$assigned_count}'
 }
 
 generate_config() {
@@ -1798,7 +1866,7 @@ require_commands
 ensure_state
 
 case "$command_name" in
-	node-add|node-update|node-delete|node-test|device-bind|wifi-toggle|wifi-apply|wifi-disconnect|ports-apply|ports-confirm|subscription-add|subscription-save|subscription-update|subscription-delete|policy-apply|backup-restore|password-set|system-reboot|apply)
+	node-add|node-update|node-delete|node-test|device-bind|devices-assign-node|wifi-toggle|wifi-apply|wifi-disconnect|ports-apply|ports-confirm|subscription-add|subscription-save|subscription-update|subscription-delete|policy-apply|backup-restore|password-set|system-reboot|apply)
 		acquire_mutation_lock
 		assert_state_writable
 		;;
@@ -1816,6 +1884,7 @@ case "$command_name" in
 	health-check) health_check ;;
 	egress-check) egress_check "$input" ;;
 	device-bind) device_bind "$input" ;;
+	devices-assign-node) devices_assign_node "$input" ;;
 	wifi-status) wifi_status ;;
 	wifi-config) wifi_config ;;
 	wifi-toggle) wifi_toggle "$input" ;;

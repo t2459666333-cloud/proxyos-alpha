@@ -17,6 +17,7 @@ case "$1" in
   "health_check": {},
   "egress_check": {"node_id":"", "device_mac":""},
   "device_bind": {"mac":"", "ip":"", "name":"", "policy":"", "node_id":"", "backup_node_id":"", "failure_mode":"", "auto_source":""},
+  "devices_assign_node": {"node_id":"", "device_macs":[]},
   "wifi_status": {},
   "wifi_config": {},
   "wifi_toggle": {"enabled":true},
@@ -76,6 +77,9 @@ EOF
 				;;
 			device_bind)
 				exec "$CTL" device-bind "$input"
+				;;
+			devices_assign_node)
+				exec "$CTL" devices-assign-node "$input"
 				;;
 			wifi_toggle)
 				exec "$CTL" wifi-toggle "$input"

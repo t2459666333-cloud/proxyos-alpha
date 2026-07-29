@@ -353,23 +353,32 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--blue); }
 .egress-ip { display: inline; min-width: 0; color: inherit; font: inherit; font-weight: 400; white-space: nowrap; }
 .egress-ip.is-error { color: var(--red); }
 
-.node-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 22px; margin-bottom: 24px; }
+.node-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; margin-bottom: 22px; }
 .node-stat {
-  min-height: 156px; padding: 25px 22px; display: flex; gap: 18px; border: 1px solid var(--line); border-radius: 17px; background: #fff; box-shadow: var(--shadow);
+  min-height: 146px; padding: 22px 20px; display: grid; grid-template-columns: 54px minmax(0,1fr); align-items: start; gap: 17px;
+  border: 1px solid var(--line); border-radius: 17px; background: #fff; box-shadow: var(--shadow);
 }
 .node-stat-icon {
-  width: 57px; height: 57px; display: inline-flex; align-items: center; justify-content: center; flex: none; border-radius: 15px; color: #fff;
+  width: 54px; height: 54px; display: inline-flex; align-items: center; justify-content: center; border-radius: 15px; color: #fff;
 }
 .node-stat-icon.blue { background: linear-gradient(145deg,#4d88ff,#285fec); }
 .node-stat-icon.green { background: linear-gradient(145deg,#55bf76,#2b9e52); }
 .node-stat-icon.violet { background: linear-gradient(145deg,#9d6ff3,#7947df); }
 .node-stat-icon.orange { background: linear-gradient(145deg,#ff9c42,#ff711f); }
 .node-stat-icon .icon { width: 27px; height: 27px; }
-.node-stat-copy { min-width: 0; }
+.node-stat-copy { min-width: 0; display: grid; align-content: start; }
 .node-stat-copy span { color: #64718a; font-size: 13px; }
-.node-stat-copy strong { display: block; margin: 8px 0 12px; color: #17203b; font-size: 29px; line-height: 1; }
+.node-stat-copy > strong { display: block; margin: 8px 0 12px; color: #17203b; font-size: 29px; line-height: 1; }
 .node-stat-copy small { color: #8792a6; }
-.protocol-mini { display: grid; grid-template-columns: 1fr auto; gap: 5px 14px; width: 145px; font-size: 11px; color: #53617a; }
+.dual-average { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; margin: 8px 0 11px; }
+.dual-average > div { min-width: 0; padding: 7px 8px; border-radius: 8px; background: #f7f8fc; white-space: nowrap; }
+.dual-average small { display: block; margin-bottom: 3px; font-size: 9px; }
+.dual-average strong { color: #17203b; font-size: 18px; line-height: 1; }
+.dual-average em { margin-left: 3px; color: #6d7890; font-size: 9px; font-style: normal; }
+.protocol-mini { display: grid; gap: 5px; margin-top: 10px; font-size: 11px; color: #53617a; }
+.protocol-mini > div { min-width: 0; display: grid; grid-template-columns: minmax(0,1fr) 28px; align-items: center; gap: 8px; }
+.protocol-mini > div > span { overflow: hidden; color: #53617a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.protocol-mini strong { color: #17203b; font-size: 13px; text-align: right; }
 .protocol-mini i { width: 7px; height: 7px; display: inline-block; border-radius: 50%; margin-right: 6px; }
 .node-panel { overflow: hidden; }
 .node-filterbar { min-height: 77px; display: flex; align-items: center; gap: 14px; padding: 0 20px; border-bottom: 1px solid var(--line); }
@@ -393,6 +402,8 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--blue); }
 .pagination { display: flex; align-items: center; gap: 8px; }
 .pagination button { width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #53617a; }
 .pagination button.is-active { border: 1px solid var(--blue); color: var(--blue); background: #f5f8ff; }
+.pagination button:disabled { color: #bbc3d0; cursor: not-allowed; }
+.pagination > span { min-width: 76px; color: #69758b; font-size: 11px; text-align: center; }
 .pagination select { width: 100px; height: 34px; margin-left: 18px; font-size: 11px; }
 .subscription-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 20px; }
 .subscription-card { padding: 24px; }
@@ -593,6 +604,29 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--blue); }
 .split-actions > div { display: flex; gap: 10px; }
 .button-danger-soft { border-color: #ffd2d2; background: #fff5f5; color: #d44242; }
 .button-danger-soft:hover { background: #ffeaea; }
+.assign-node-modal { width: min(620px,100%); }
+.assign-node-modal .modal-head { min-height: 78px; align-items: flex-start; padding-top: 17px; padding-bottom: 14px; }
+.assign-node-modal .modal-head > div { display: grid; gap: 6px; }
+.assign-node-modal .modal-head p { display: flex; align-items: center; gap: 9px; color: #8793a8; font-size: 11px; }
+.assign-node-modal .modal-head p strong { color: #24334e; font-size: 13px; }
+.assign-device-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 38px; }
+.assign-device-toolbar label { display: inline-flex; align-items: center; gap: 8px; color: #3e4c66; cursor: pointer; }
+.assign-device-toolbar input, .assign-device-option input { width: 16px; height: 16px; accent-color: var(--blue); }
+.assign-device-toolbar span { color: #7f8ba0; font-size: 11px; }
+.assign-device-list { max-height: 390px; overflow-y: auto; display: grid; gap: 8px; padding: 2px; }
+.assign-device-option {
+  min-height: 66px; padding: 10px 12px; display: grid; grid-template-columns: 17px 42px minmax(0,1fr) auto; align-items: center; gap: 11px;
+  border: 1px solid var(--line); border-radius: 11px; background: #fff; cursor: pointer; transition: .16s ease;
+}
+.assign-device-option:hover { border-color: #b9ccff; background: #f9fbff; }
+.assign-device-option:has(input:checked) { border-color: var(--blue); background: #f5f8ff; box-shadow: inset 0 0 0 1px rgba(47,107,255,.05); }
+.assign-device-option.is-current { border-style: dashed; }
+.assign-device-copy { min-width: 0; display: grid; gap: 4px; }
+.assign-device-copy strong { overflow: hidden; color: #1d2b46; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.assign-device-copy small { overflow: hidden; color: #8793a8; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.assign-device-state { min-width: 48px; padding: 5px 8px; border-radius: 12px; text-align: center; font-size: 10px; }
+.assign-device-state.online { color: var(--green); background: var(--green-soft); }
+.assign-device-state.offline { color: #7f8ba0; background: #f0f2f6; }
 #node-modal {
   align-items: flex-end;
   padding: 24px 24px 88px 320px;

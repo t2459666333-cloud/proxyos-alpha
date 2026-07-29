@@ -30,6 +30,7 @@
           "node_test",
           "health_check",
           "device_bind",
+          "devices_assign_node",
           "wifi_toggle",
           "wifi_apply",
           "wifi_disconnect",

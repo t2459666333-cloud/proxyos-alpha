@@ -16,9 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential curl zstd python3-yaml
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl jq zstd python3-yaml
       - name: Run project checks
         run: npm test && npm run check
+      - name: Run portable hardware detection checks
+        run: bash ./tests/run-hardware-detection-test.sh
       - name: Run controller integration checks
         run: |
           curl --fail --location --retry 3 \

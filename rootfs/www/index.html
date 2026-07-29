@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>ProxyOS</title>
-    <link rel="icon" type="image/svg+xml" href="/assets/proxyos-mark.svg?v=0.3.0rc1" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.3.0rc1" />
+    <link rel="icon" type="image/svg+xml" href="/assets/proxyos-mark.svg?v=0.3.0rc2" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.3.0rc2" />
   </head>
   <body>
     <div id="toast" class="toast" aria-live="polite"></div>
@@ -132,7 +132,7 @@
                 <tbody id="node-table-body"></tbody>
               </table>
             </div>
-            <div class="table-foot split"><span id="node-count">共 0 条</span><div class="pagination"><button disabled>‹</button><button class="is-active">1</button><button disabled>›</button><select><option>10 条/页</option></select></div></div>
+            <div class="table-foot split"><span id="node-count">共 0 条</span><div class="pagination"><button id="node-page-prev" type="button" aria-label="上一页">‹</button><span id="node-page-indicator">第 1 / 1 页</span><button id="node-page-next" type="button" aria-label="下一页">›</button><select id="node-page-size"><option value="10">10 条/页</option><option value="20">20 条/页</option><option value="50">50 条/页</option></select></div></div>
           </article>
         </section>
 
@@ -242,6 +242,24 @@
       </aside>
     </div>
 
+    <div id="assign-node-modal" class="modal-backdrop is-hidden">
+      <section class="modal assign-node-modal">
+        <div class="modal-head">
+          <div><h2>分配设备</h2><p><strong id="assign-node-title">节点</strong><span id="assign-node-subtitle"></span></p></div>
+          <button class="icon-button close-layer">×</button>
+        </div>
+        <form id="assign-node-form" class="modal-body">
+          <div class="assign-device-toolbar">
+            <label><input id="assign-node-select-all" type="checkbox" />全选设备</label>
+            <span id="assign-node-count">已选择 0 台设备</span>
+          </div>
+          <div id="assign-node-device-list" class="assign-device-list"></div>
+          <p class="form-note">支持同时选择在线和离线设备；节点只检测一次，所有选择会作为一项配置统一生效。</p>
+          <div class="modal-actions"><button type="button" class="button button-ghost close-layer">取消</button><button id="assign-node-submit" class="button button-primary" type="submit" disabled>分配所选设备</button></div>
+        </form>
+      </section>
+    </div>
+
     <div id="node-modal" class="modal-backdrop is-hidden">
       <section class="modal node-modal">
         <div class="modal-head"><h2>添加节点</h2><button class="icon-button close-layer">×</button></div>
@@ -297,6 +315,6 @@
       </section>
     </div>
 
-    <script src="/assets/app.js?v=0.3.0rc1" type="module"></script>
+    <script src="/assets/app.js?v=0.3.0rc2" type="module"></script>
   </body>
 </html>

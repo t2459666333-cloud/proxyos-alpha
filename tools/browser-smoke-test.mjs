@@ -154,8 +154,24 @@ await check("node-modal", async () => {
   await page.locator("#node-modal .close-layer").first().click();
   const flags = await page.locator("#node-table-body .country-flag svg").count();
   if (flags < 1) throw new Error("SVG country flags were not rendered");
+  const visibleRows = await page.locator("#node-table-body tr").count();
+  if (visibleRows > 10) throw new Error(`pagination rendered ${visibleRows} rows on a 10-row page`);
   await page.screenshot({ path: resolve("work/ui-nodes.png"), fullPage: true });
-  return `${protocols} protocol choices`;
+  return `${protocols} protocol choices; ${visibleRows} paginated rows`;
+});
+
+await check("node-device-picker", async () => {
+  await page.locator('.nav-item[data-page="nodes"]').click();
+  await page.locator("#node-table-body .assign-node").first().click();
+  await page.locator("#assign-node-modal:not(.is-hidden)").waitFor({ timeout: 5_000 });
+  const deviceCount = await page.locator("#assign-node-device-list .assign-device-option").count();
+  if (deviceCount < 2) throw new Error(`expected all discovered devices, got ${deviceCount}`);
+  await page.locator("#assign-node-select-all").check();
+  const checkedCount = await page.locator("#assign-node-device-list .assign-device-check:checked").count();
+  if (checkedCount !== deviceCount) throw new Error(`select all chose ${checkedCount} of ${deviceCount}`);
+  await page.screenshot({ path: resolve("work/ui-node-device-picker.png"), fullPage: true });
+  await page.locator("#assign-node-modal .close-layer").first().click();
+  return `${deviceCount} selectable devices`;
 });
 
 await check("subscription-modal", async () => {

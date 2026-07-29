@@ -3,7 +3,8 @@
 set -eu
 
 physical_interfaces() {
-	for net_path in /sys/class/net/*; do
+	net_class_root="${PROXYOS_NET_CLASS_ROOT:-/sys/class/net}"
+	for net_path in "$net_class_root"/*; do
 		[ -e "$net_path" ] || continue
 		iface="${net_path##*/}"
 		case "$iface" in

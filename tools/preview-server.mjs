@@ -9,7 +9,7 @@ let currentSession = "";
 
 const mock = {
   status: {
-    version: "0.3.0-rc1",
+    version: "0.3.0-rc2",
     hostname: "ProxyOS",
     model: "Intel N100 · x86-64",
     kernel: "6.12.74",
@@ -120,6 +120,15 @@ async function handleRpc(request, response) {
       );
       mock.status.bound_device_count = mock.devices.filter((device) => device.policy === "fixed_node").length;
       data = { ok: true };
+    } else if (method === "devices_assign_node") {
+      const selected = new Set(params.device_macs || []);
+      mock.devices = mock.devices.map((device) =>
+        selected.has(device.mac)
+          ? { ...device, policy: "fixed_node", node_id: params.node_id }
+          : device,
+      );
+      mock.status.bound_device_count = mock.devices.filter((device) => device.policy === "fixed_node").length;
+      data = { ok: true, assigned_count: selected.size };
     } else if (method === "wifi_toggle") {
       mock.wifi_status.enabled = params.enabled;
       mock.wifi_config.enabled = params.enabled;
@@ -173,7 +182,7 @@ async function handleRpc(request, response) {
     } else if (method === "egress_check") {
       data = { ok: true, ip: "203.0.113.10", mode: "node", blocked: false };
     } else if (method === "update_check") {
-      data = { ok: true, current_version: "0.3.0-rc1", latest_version: "0.3.0-rc1", available: false };
+      data = { ok: true, current_version: "0.3.0-rc2", latest_version: "0.3.0-rc2", available: false };
     } else if (method === "backup_create") {
       data = { ok: true, filename: "ProxyOS-backup-preview.tar.gz", data_base64: "H4sIAAAAAAACAAMAAAAAAAAAAA==" };
     } else {

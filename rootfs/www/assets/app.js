@@ -23,6 +23,8 @@ const state = {
   policy: { default_policy: "direct", default_node_id: "" },
   selectedDevice: null,
   selectedDevices: new Set(),
+  assigningNodeId: "",
+  assigningNodeDevices: new Set(),
   egressByDevice: new Map(),
   egressQueueRunning: false,
   editingNode: "",
@@ -30,6 +32,8 @@ const state = {
   nodeSource: "all",
   nodeHealth: "all",
   nodeSubscription: "all",
+  nodePage: 1,
+  nodePageSize: 10,
   drawerNodeSource: "all",
   rollbackTimer: null,
   refreshTimer: null,
@@ -179,7 +183,7 @@ async function ubusCall(object, method, payload = {}, session = state.session, t
 
 const api = (method, payload = {}) =>
   ubusCall("proxyos", method, payload, state.session,
-    ["subscription_update", "device_bind", "node_test"].includes(method) ? 90000 : 30000);
+    ["subscription_update", "device_bind", "devices_assign_node", "node_test"].includes(method) ? 90000 : 30000);
 const unwrapItems = (value) => (Array.isArray(value?.items) ? value.items : Array.isArray(value) ? value : []);
 
 async function login(username, password) {
@@ -515,8 +519,8 @@ function renderNodeMetrics() {
   $("#node-metrics").innerHTML = `
     <article class="node-stat"><span class="node-stat-icon blue"><span class="icon" data-icon="database"></span></span><div class="node-stat-copy"><span>总节点数</span><strong>${state.nodes.length}</strong><small>手动与订阅节点</small></div></article>
     <article class="node-stat"><span class="node-stat-icon green"><span class="icon" data-icon="check-circle"></span></span><div class="node-stat-copy"><span>可用节点</span><strong>${available}</strong><small>可用率 ${state.nodes.length ? ((available / state.nodes.length) * 100).toFixed(1) : "0.0"}%</small></div></article>
-    <article class="node-stat"><span class="node-stat-icon violet"><span class="icon" data-icon="zap"></span></span><div class="node-stat-copy"><span>平均延迟</span><strong class="average-latency">国内 ${domesticAverage || "—"}${domesticAverage ? " ms" : ""}<br>国外 ${foreignAverage || "—"}${foreignAverage ? " ms" : ""}</strong><small>百度 / Google 双线路测试</small></div></article>
-    <article class="node-stat"><span class="node-stat-icon orange"><span class="icon" data-icon="pie"></span></span><div class="node-stat-copy"><span>协议分布</span><div class="protocol-mini">${distribution.length ? distribution.map(([name,count], index) => `<span><i style="background:${["#2f6bff","#2da860","#ee5b5b","#aeb8ca"][index]}"></i>${escapeHtml(name)}</span><strong>${count}</strong>`).join("") : "<small>暂无节点</small>"}</div></div></article>`;
+    <article class="node-stat node-stat-latency"><span class="node-stat-icon violet"><span class="icon" data-icon="zap"></span></span><div class="node-stat-copy"><span>平均延迟</span><div class="dual-average"><div><small>国内</small><strong>${domesticAverage || "—"}</strong><em>${domesticAverage ? "ms" : ""}</em></div><div><small>国外</small><strong>${foreignAverage || "—"}</strong><em>${foreignAverage ? "ms" : ""}</em></div></div><small>百度 / Google 双线路测试</small></div></article>
+    <article class="node-stat node-stat-protocol"><span class="node-stat-icon orange"><span class="icon" data-icon="pie"></span></span><div class="node-stat-copy"><span>协议分布</span><div class="protocol-mini">${distribution.length ? distribution.map(([name,count], index) => `<div><span><i style="background:${["#2f6bff","#2da860","#ee5b5b","#aeb8ca"][index]}"></i>${escapeHtml(name)}</span><strong>${count}</strong></div>`).join("") : "<small>暂无节点</small>"}</div></div></article>`;
 }
 
 function filteredNodes() {
@@ -547,7 +551,11 @@ function renderNodes() {
     subscriptionFilter.disabled = state.nodeSource === "manual";
   }
   const nodes = filteredNodes();
-  $("#node-table-body").innerHTML = nodes.length ? nodes.map((node) => {
+  const pageCount = Math.max(1, Math.ceil(nodes.length / state.nodePageSize));
+  state.nodePage = Math.min(Math.max(1, state.nodePage), pageCount);
+  const pageStart = (state.nodePage - 1) * state.nodePageSize;
+  const pageNodes = nodes.slice(pageStart, pageStart + state.nodePageSize);
+  $("#node-table-body").innerHTML = pageNodes.length ? pageNodes.map((node) => {
     const [countryCode, country] = countryFor(node);
     return `<tr>
       <td><div class="node-name"><strong>${escapeHtml(cleanNodeName(node.name))}</strong><small>${escapeHtml(node.server || "服务器地址已保护")}</small></div></td>
@@ -559,7 +567,13 @@ function renderNodes() {
       <td><div class="node-actions"><button class="text-action edit-node" data-id="${escapeHtml(node.id)}">编辑</button><button class="text-action test-node" data-id="${escapeHtml(node.id)}">测速</button><button class="text-action assign-node" data-id="${escapeHtml(node.id)}">分配设备</button><button class="more-button delete-node" data-id="${escapeHtml(node.id)}">⋮</button></div></td>
     </tr>`;
   }).join("") : `<tr><td colspan="7"><div class="empty-state">节点库为空，请添加手动节点或订阅。</div></td></tr>`;
-  $("#node-count").textContent = `共 ${nodes.length} 条`;
+  $("#node-count").textContent = nodes.length
+    ? `共 ${nodes.length} 条 · 当前 ${pageStart + 1}–${Math.min(pageStart + state.nodePageSize, nodes.length)}`
+    : "共 0 条";
+  $("#node-page-prev").disabled = state.nodePage <= 1;
+  $("#node-page-next").disabled = state.nodePage >= pageCount;
+  $("#node-page-indicator").textContent = `第 ${state.nodePage} / ${pageCount} 页`;
+  $("#node-page-size").value = String(state.nodePageSize);
   hydrateIcons();
   $$(".delete-node").forEach((button) => button.addEventListener("click", () => deleteNode(button.dataset.id)));
   $$(".test-node").forEach((button) => button.addEventListener("click", () => testNode(button)));
@@ -656,13 +670,13 @@ function renderPolicies() {
 
 function renderSystem() {
   const healthy = Boolean(state.status.singbox_running);
-  $("#system-version").textContent = state.status.version || "0.3.0-rc1";
+  $("#system-version").textContent = state.status.version || "0.3.0-rc2";
   $("#system-model").textContent = state.status.model || "x86-64";
   $("#system-kernel").textContent = state.status.kernel || "—";
   $("#system-core").textContent = healthy ? "运行正常" : "未运行";
   $("#sidebar-core-text").textContent = healthy ? "系统运行正常" : "代理核心异常";
   $("#sidebar-uptime").textContent = formatUptime(state.status.uptime);
-  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc1";
+  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc2";
   $("#sidebar-kernel").textContent = state.status.kernel || "—";
   ["#global-health", "#system-health-pill"].forEach((selector) => {
     const pill = $(selector);
@@ -890,12 +904,69 @@ async function testNode(button) {
   finally { button.disabled = false; button.textContent = old; }
 }
 function assignNode(id) {
-  const device = state.devices.find((item) => item.online) || state.devices[0];
-  if (!device) return showToast("当前没有可分配的设备", true);
-  openDeviceDrawer(device.mac);
-  $("#device-policy-form input[value=fixed_node]").checked = true;
-  $("#drawer-node-select").value = id;
-  syncDrawerNodeState();
+  const node = state.nodes.find((item) => item.id === id);
+  if (!node) return showToast("节点不存在或已被删除", true);
+  if (!state.devices.length) return showToast("当前没有可分配的设备", true);
+  state.assigningNodeId = id;
+  state.assigningNodeDevices.clear();
+  $("#assign-node-title").textContent = cleanNodeName(node.name);
+  $("#assign-node-subtitle").textContent = `${node.protocol} · ${node.source_type === "subscription" ? subscriptionForNode(node)?.name || "订阅节点" : "手动节点"}`;
+  $("#assign-node-select-all").checked = false;
+  renderAssignNodeDevices();
+  $("#assign-node-modal").classList.remove("is-hidden");
+  hydrateIcons($("#assign-node-modal"));
+}
+
+function renderAssignNodeDevices() {
+  const list = $("#assign-node-device-list");
+  list.innerHTML = state.devices.map((device) => {
+    const currentNode = nodeFor(device);
+    const assignedHere = device.policy === "fixed_node" && device.node_id === state.assigningNodeId;
+    return `<label class="assign-device-option ${assignedHere ? "is-current" : ""}">
+      <input class="assign-device-check" type="checkbox" value="${escapeHtml(device.mac)}" ${state.assigningNodeDevices.has(device.mac) ? "checked" : ""} />
+      <span class="device-avatar"><span class="icon" data-icon="${deviceIcon(device)}"></span></span>
+      <span class="assign-device-copy"><strong>${escapeHtml(device.name || "未知设备")}</strong><small>${escapeHtml(device.ip || "—")} · ${isWifiDevice(device) ? "Wi‑Fi" : "LAN"}${currentNode ? ` · 当前 ${escapeHtml(cleanNodeName(currentNode.name))}` : ""}</small></span>
+      <span class="assign-device-state ${device.online ? "online" : "offline"}">${assignedHere ? "已分配" : device.online ? "在线" : "离线"}</span>
+    </label>`;
+  }).join("");
+  $$(".assign-device-check", list).forEach((input) => input.addEventListener("change", () => {
+    if (input.checked) state.assigningNodeDevices.add(input.value);
+    else state.assigningNodeDevices.delete(input.value);
+    syncAssignNodeCount();
+  }));
+  hydrateIcons(list);
+  syncAssignNodeCount();
+}
+
+function syncAssignNodeCount() {
+  const count = state.assigningNodeDevices.size;
+  $("#assign-node-count").textContent = `已选择 ${count} 台设备`;
+  $("#assign-node-submit").disabled = count === 0;
+  $("#assign-node-select-all").checked = state.devices.length > 0 && count === state.devices.length;
+  $("#assign-node-select-all").indeterminate = count > 0 && count < state.devices.length;
+}
+
+async function submitNodeAssignment(event) {
+  event.preventDefault();
+  const button = event.submitter;
+  const deviceMacs = [...state.assigningNodeDevices];
+  if (!deviceMacs.length) return showToast("请至少选择一台设备", true);
+  button.disabled = true;
+  button.textContent = "正在分配…";
+  try {
+    const result = await api("devices_assign_node", {
+      node_id: state.assigningNodeId,
+      device_macs: deviceMacs,
+    });
+    closeLayers();
+    await loadAll({ quiet: true });
+    showToast(`已为 ${result.assigned_count || deviceMacs.length} 台设备分配节点`);
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "分配所选设备";
+  }
 }
 
 async function addSubscription(event) {
@@ -1247,10 +1318,11 @@ function bindEvents() {
   $("#batch-block").addEventListener("click", batchBlock);
   $("#batch-change-node").addEventListener("click", batchChangeNode);
   $("#batch-egress-check").addEventListener("click", batchEgressCheck);
-  $("#node-search").addEventListener("input", renderNodes);
-  $("#node-protocol-filter").addEventListener("change", renderNodes);
+  $("#node-search").addEventListener("input", () => { state.nodePage = 1; renderNodes(); });
+  $("#node-protocol-filter").addEventListener("change", () => { state.nodePage = 1; renderNodes(); });
   $("#node-subscription-filter").addEventListener("change", (event) => {
     state.nodeSubscription = event.target.value;
+    state.nodePage = 1;
     if (state.nodeSubscription !== "all" && state.nodeSource === "manual") {
       state.nodeSource = "subscription";
       $$("#node-source-tabs button").forEach((item) => item.classList.toggle("is-active", item.dataset.value === "subscription"));
@@ -1259,15 +1331,24 @@ function bindEvents() {
   });
   $$("#node-source-tabs button").forEach((button) => button.addEventListener("click", () => {
     state.nodeSource = button.dataset.value;
+    state.nodePage = 1;
     if (state.nodeSource === "manual") state.nodeSubscription = "all";
     $$("#node-source-tabs button").forEach((item) => item.classList.toggle("is-active", item === button));
     renderNodes();
   }));
   $$("#node-health-tabs button").forEach((button) => button.addEventListener("click", () => {
     state.nodeHealth = button.dataset.value;
+    state.nodePage = 1;
     $$("#node-health-tabs button").forEach((item) => item.classList.toggle("is-active", item === button));
     renderNodes();
   }));
+  $("#node-page-prev").addEventListener("click", () => { state.nodePage -= 1; renderNodes(); });
+  $("#node-page-next").addEventListener("click", () => { state.nodePage += 1; renderNodes(); });
+  $("#node-page-size").addEventListener("change", (event) => {
+    state.nodePageSize = Number(event.target.value) || 10;
+    state.nodePage = 1;
+    renderNodes();
+  });
   $("#reload-nodes").addEventListener("click", () => loadAll());
   $("#open-node-modal").addEventListener("click", () => openNodeModal());
   $("#open-subscription-modal").addEventListener("click", () => $("#subscription-modal").classList.remove("is-hidden"));
@@ -1300,6 +1381,12 @@ function bindEvents() {
     });
   });
   $("#device-policy-form").addEventListener("submit", saveDevicePolicy);
+  $("#assign-node-form").addEventListener("submit", submitNodeAssignment);
+  $("#assign-node-select-all").addEventListener("change", (event) => {
+    state.assigningNodeDevices.clear();
+    if (event.currentTarget.checked) state.devices.forEach((device) => state.assigningNodeDevices.add(device.mac));
+    renderAssignNodeDevices();
+  });
   $("#node-protocol").addEventListener("change", syncNodeProtocolFields);
   $("#node-form").addEventListener("submit", addNode);
   $("#subscription-form").addEventListener("submit", addSubscription);
