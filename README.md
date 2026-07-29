@@ -1,4 +1,4 @@
-# ProxyOS 0.3.0 RC1
+# ProxyOS 0.3.0 RC2
 
 ProxyOS is an x86-64 OpenWrt derivative focused on one job: assigning an
 independent sing-box outbound to every LAN or Wi-Fi client.
@@ -6,7 +6,7 @@ independent sing-box outbound to every LAN or Wi-Fi client.
 This repository contains a reproducible OpenWrt ImageBuilder project. It does
 not contain a renamed stock image or a placeholder firmware file.
 
-## 0.3.0 RC1 scope
+## 0.3.0 RC2 scope
 
 - OpenWrt 25.12.5 x86-64, UEFI and legacy BIOS images
 - A custom responsive Web console
@@ -20,6 +20,8 @@ not contain a renamed stock image or a placeholder firmware file.
 - TUN plus `auto_route` and `auto_redirect`
 - Auto-detected sing-box JSON, Clash YAML/JSON, Base64, and share-link subscriptions
 - Node editing, health tests, per-node egress-IP checks, and five-minute health refresh
+- Real node pagination and multi-device assignment from every node, including
+  clear online/offline and current-assignment indicators
 - Every node test measures the real proxy path to Baidu and Google in parallel,
   and stores the domestic and international latency independently
 - Wi-Fi/AP capability detection, radio toggle, radio settings, client disconnect,
@@ -40,6 +42,8 @@ not contain a renamed stock image or a placeholder firmware file.
 - A 24-hour Web session, automatic in-memory session renewal, reduced background
   polling, and automatic refresh when the browser tab becomes active again
 - Configuration backup/restore, password changes, logs, and controlled reboot
+- Update checks that degrade gracefully when no public release channel has
+  been configured yet
 
 ## Release-candidate limitations
 
