@@ -9,7 +9,7 @@ let currentSession = "";
 
 const mock = {
   status: {
-    version: "0.3.0-rc2",
+    version: "0.3.0-rc3",
     hostname: "ProxyOS",
     model: "Intel N100 · x86-64",
     kernel: "6.12.74",
@@ -33,12 +33,12 @@ const mock = {
     { name: "iPad Air", mac: "AA:BB:CC:10:20:05", ip: "192.168.10.105", online: false, policy: "block", node_id: "", connection: "Wi‑Fi 5 GHz" },
   ],
   nodes: [
-    { id: "hk01", name: "香港 01", protocol: "vless", source_type: "subscription", source_id: "sub01", server: "hk.example.com", server_port: 443, enabled: true, status: "available", latency_ms: 58, latency_domestic_ms: 32, latency_foreign_ms: 58 },
-    { id: "us02", name: "美国住宅 02", protocol: "trojan", source_type: "subscription", source_id: "sub02", server: "us.example.com", server_port: 443, enabled: true, status: "available", latency_ms: 168, latency_domestic_ms: 128, latency_foreign_ms: 168 },
-    { id: "jp01", name: "日本手动线路", protocol: "socks", source_type: "manual", source_id: "", server: "jp.example.com", server_port: 1080, enabled: true, status: "available", latency_ms: 91, latency_domestic_ms: 72, latency_foreign_ms: 91 },
-    { id: "sg01", name: "新加坡 01", protocol: "hysteria2", source_type: "subscription", source_id: "sub01", server: "sg.example.com", server_port: 8443, enabled: true, status: "available", latency_ms: 82, latency_domestic_ms: 45, latency_foreign_ms: 82 },
-    { id: "de01", name: "德国 01", protocol: "vmess", source_type: "subscription", source_id: "sub02", server: "de.example.com", server_port: 443, enabled: true, status: "available", latency_ms: 235, latency_domestic_ms: 198, latency_foreign_ms: 235 },
-    { id: "uk01", name: "英国 01", protocol: "shadowsocks", source_type: "manual", source_id: "", server: "uk.example.com", server_port: 8388, enabled: true, status: "available", latency_ms: 224, latency_domestic_ms: 187, latency_foreign_ms: 224 },
+    { id: "hk01", name: "香港 01", protocol: "vless", source_type: "subscription", source_id: "sub01", server: "hk.example.com", server_port: 443, enabled: true, status: "available", latency_ms: 58, latency_domestic_ms: 32, latency_foreign_ms: 58, download_mbps: 86.4, packet_loss_percent: 0, stability_score: 98 },
+    { id: "us02", name: "美国住宅 02", protocol: "trojan", source_type: "subscription", source_id: "sub02", server: "us.example.com", server_port: 443, enabled: true, status: "available", latency_ms: 168, latency_domestic_ms: 128, latency_foreign_ms: 168, download_mbps: 42.7, packet_loss_percent: 0, stability_score: 92 },
+    { id: "jp01", name: "日本手动线路", protocol: "socks", source_type: "manual", source_id: "", server: "jp.example.com", server_port: 1080, enabled: true, status: "available", latency_ms: 91, latency_domestic_ms: 72, latency_foreign_ms: 91, download_mbps: 61.2, packet_loss_percent: 20, stability_score: 76 },
+    { id: "sg01", name: "新加坡 01", protocol: "hysteria2", source_type: "subscription", source_id: "sub01", server: "sg.example.com", server_port: 8443, enabled: true, status: "available", latency_ms: 82, latency_domestic_ms: 45, latency_foreign_ms: 82, download_mbps: 73.8, packet_loss_percent: 0, stability_score: 96 },
+    { id: "de01", name: "德国 01", protocol: "vmess", source_type: "subscription", source_id: "sub02", server: "de.example.com", server_port: 443, enabled: true, status: "available", latency_ms: 235, latency_domestic_ms: 198, latency_foreign_ms: 235, download_mbps: 24.5, packet_loss_percent: 20, stability_score: 68 },
+    { id: "uk01", name: "英国 01", protocol: "shadowsocks", source_type: "manual", source_id: "", server: "uk.example.com", server_port: 8388, enabled: true, status: "available", latency_ms: 224, latency_domestic_ms: 187, latency_foreign_ms: 224, download_mbps: 18.9, packet_loss_percent: 40, stability_score: 48 },
   ],
   wifi_status: { available: true, enabled: true, phy: "phy0", driver: "mt7921e", reason: "" },
   wifi_config: {
@@ -178,11 +178,21 @@ async function handleRpc(request, response) {
     } else if (method === "system_logs") {
       data = { items: ["proxyos: configuration loaded", "proxyos: sing-box is running"] };
     } else if (method === "node_test") {
-      data = { ok: true, status: "available", latency_ms: 76, latency_domestic_ms: 38, latency_foreign_ms: 76 };
+      const testedNode = mock.nodes.find((node) => node.id === params.id);
+      Object.assign(testedNode || {}, {
+        status: "available",
+        latency_ms: 76,
+        latency_domestic_ms: 38,
+        latency_foreign_ms: 76,
+        download_mbps: 68.5,
+        packet_loss_percent: 0,
+        stability_score: 97,
+      });
+      data = { ok: true, status: "available", latency_ms: 76, latency_domestic_ms: 38, latency_foreign_ms: 76, download_mbps: 68.5, packet_loss_percent: 0, stability_score: 97 };
     } else if (method === "egress_check") {
       data = { ok: true, ip: "203.0.113.10", mode: "node", blocked: false };
     } else if (method === "update_check") {
-      data = { ok: true, current_version: "0.3.0-rc2", latest_version: "0.3.0-rc2", available: false };
+      data = { ok: true, current_version: "0.3.0-rc3", latest_version: "0.3.0-rc3", available: false };
     } else if (method === "backup_create") {
       data = { ok: true, filename: "ProxyOS-backup-preview.tar.gz", data_base64: "H4sIAAAAAAACAAMAAAAAAAAAAA==" };
     } else {

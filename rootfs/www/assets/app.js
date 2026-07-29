@@ -396,6 +396,32 @@ function latencyPairMarkup(node, includeSignal = false) {
   };
   return `<span class="latency-pair">${line("国内", domestic)}${line("国外", foreign)}</span>`;
 }
+function downloadSpeedMarkup(node) {
+  const value = Number(node?.download_mbps);
+  return Number.isFinite(value) && value > 0
+    ? `<span class="quality-value speed">${value.toFixed(1)}<small>Mbps</small></span>`
+    : `<span class="quality-value muted">—</span>`;
+}
+function packetLossMarkup(node) {
+  if (node?.packet_loss_percent == null || node.packet_loss_percent === "") return `<span class="quality-value muted">—</span>`;
+  const value = Number(node?.packet_loss_percent);
+  if (!Number.isFinite(value) || value < 0) return `<span class="quality-value muted">—</span>`;
+  const tone = value === 0 ? "good" : value < 40 ? "warn" : "bad";
+  return `<span class="quality-value ${tone}">${Math.round(value)}<small>%</small></span>`;
+}
+function stabilityMarkup(node) {
+  if (node?.stability_score == null || node.stability_score === "") return `<span class="quality-badge unknown">未测试</span>`;
+  const value = Number(node?.stability_score);
+  if (!Number.isFinite(value) || value < 0) return `<span class="quality-badge unknown">未测试</span>`;
+  const tone = value >= 90 ? "excellent" : value >= 70 ? "stable" : value >= 50 ? "warn" : "poor";
+  const label = value >= 90 ? "优秀" : value >= 70 ? "稳定" : value >= 50 ? "波动" : "不稳定";
+  return `<span class="quality-badge ${tone}"><strong>${Math.round(value)}</strong><small>${label}</small></span>`;
+}
+function qualityText(value, suffix = "") {
+  if (value == null || value === "") return "尚未完整测速";
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? `${numeric}${suffix}` : "尚未完整测速";
+}
 function egressIpFor(device) {
   return state.egressByDevice.get(device.mac) || device.egress_ip || "";
 }
@@ -513,12 +539,18 @@ function renderNodeMetrics() {
   const foreignLatencies = state.nodes.map((node) => Number(node.latency_foreign_ms)).filter((value) => value > 0);
   const domesticAverage = domesticLatencies.length ? Math.round(domesticLatencies.reduce((sum, value) => sum + value, 0) / domesticLatencies.length) : 0;
   const foreignAverage = foreignLatencies.length ? Math.round(foreignLatencies.reduce((sum, value) => sum + value, 0) / foreignLatencies.length) : 0;
+  const stabilityValues = state.nodes
+    .filter((node) => node.stability_score != null && node.stability_score !== "")
+    .map((node) => Number(node.stability_score))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const stabilityAverage = stabilityValues.length ? Math.round(stabilityValues.reduce((sum, value) => sum + value, 0) / stabilityValues.length) : 0;
+  const fullyTested = state.nodes.filter((node) => Number(node.download_mbps) > 0 && Number(node.stability_score) >= 0).length;
   const protocols = new Map();
   state.nodes.forEach((node) => protocols.set(node.protocol, (protocols.get(node.protocol) || 0) + 1));
   const distribution = [...protocols.entries()].slice(0, 4);
   $("#node-metrics").innerHTML = `
-    <article class="node-stat"><span class="node-stat-icon blue"><span class="icon" data-icon="database"></span></span><div class="node-stat-copy"><span>总节点数</span><strong>${state.nodes.length}</strong><small>手动与订阅节点</small></div></article>
-    <article class="node-stat"><span class="node-stat-icon green"><span class="icon" data-icon="check-circle"></span></span><div class="node-stat-copy"><span>可用节点</span><strong>${available}</strong><small>可用率 ${state.nodes.length ? ((available / state.nodes.length) * 100).toFixed(1) : "0.0"}%</small></div></article>
+    <article class="node-stat"><span class="node-stat-icon blue"><span class="icon" data-icon="database"></span></span><div class="node-stat-copy"><span>总节点数</span><strong>${state.nodes.length}</strong><small>已完整测速 ${fullyTested} 个</small></div></article>
+    <article class="node-stat"><span class="node-stat-icon green"><span class="icon" data-icon="check-circle"></span></span><div class="node-stat-copy"><span>可用节点</span><strong>${available}</strong><small>可用率 ${state.nodes.length ? ((available / state.nodes.length) * 100).toFixed(1) : "0.0"}%${stabilityValues.length ? ` · 平均稳定性 ${stabilityAverage}` : ""}</small></div></article>
     <article class="node-stat node-stat-latency"><span class="node-stat-icon violet"><span class="icon" data-icon="zap"></span></span><div class="node-stat-copy"><span>平均延迟</span><div class="dual-average"><div><small>国内</small><strong>${domesticAverage || "—"}</strong><em>${domesticAverage ? "ms" : ""}</em></div><div><small>国外</small><strong>${foreignAverage || "—"}</strong><em>${foreignAverage ? "ms" : ""}</em></div></div><small>百度 / Google 双线路测试</small></div></article>
     <article class="node-stat node-stat-protocol"><span class="node-stat-icon orange"><span class="icon" data-icon="pie"></span></span><div class="node-stat-copy"><span>协议分布</span><div class="protocol-mini">${distribution.length ? distribution.map(([name,count], index) => `<div><span><i style="background:${["#2f6bff","#2da860","#ee5b5b","#aeb8ca"][index]}"></i>${escapeHtml(name)}</span><strong>${count}</strong></div>`).join("") : "<small>暂无节点</small>"}</div></div></article>`;
 }
@@ -563,10 +595,13 @@ function renderNodes() {
       <td><div class="country-cell">${flagMarkup(countryCode)}<span>${country}</span></div></td>
       <td><span class="protocol-pill">${escapeHtml(node.protocol)}</span></td>
       <td>${latencyPairMarkup(node)}</td>
+      <td>${downloadSpeedMarkup(node)}</td>
+      <td>${packetLossMarkup(node)}</td>
+      <td>${stabilityMarkup(node)}</td>
       <td><span class="status-badge ${node.status === "error" ? "blocked" : "online"}">${node.status === "error" ? "异常" : "可用"}</span></td>
       <td><div class="node-actions"><button class="text-action edit-node" data-id="${escapeHtml(node.id)}">编辑</button><button class="text-action test-node" data-id="${escapeHtml(node.id)}">测速</button><button class="text-action assign-node" data-id="${escapeHtml(node.id)}">分配设备</button><button class="more-button delete-node" data-id="${escapeHtml(node.id)}">⋮</button></div></td>
     </tr>`;
-  }).join("") : `<tr><td colspan="7"><div class="empty-state">节点库为空，请添加手动节点或订阅。</div></td></tr>`;
+  }).join("") : `<tr><td colspan="10"><div class="empty-state">节点库为空，请添加手动节点或订阅。</div></td></tr>`;
   $("#node-count").textContent = nodes.length
     ? `共 ${nodes.length} 条 · 当前 ${pageStart + 1}–${Math.min(pageStart + state.nodePageSize, nodes.length)}`
     : "共 0 条";
@@ -670,13 +705,13 @@ function renderPolicies() {
 
 function renderSystem() {
   const healthy = Boolean(state.status.singbox_running);
-  $("#system-version").textContent = state.status.version || "0.3.0-rc2";
+  $("#system-version").textContent = state.status.version || "0.3.0-rc3";
   $("#system-model").textContent = state.status.model || "x86-64";
   $("#system-kernel").textContent = state.status.kernel || "—";
   $("#system-core").textContent = healthy ? "运行正常" : "未运行";
   $("#sidebar-core-text").textContent = healthy ? "系统运行正常" : "代理核心异常";
   $("#sidebar-uptime").textContent = formatUptime(state.status.uptime);
-  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc2";
+  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc3";
   $("#sidebar-kernel").textContent = state.status.kernel || "—";
   ["#global-health", "#system-health-pill"].forEach((selector) => {
     const pill = $(selector);
@@ -763,6 +798,16 @@ function openDeviceDrawer(mac) {
   $("#drawer-info-policy").textContent = policyLabels[policy] || policy;
   $("#drawer-info-node").textContent = assignedNode ? `${assignedNode.name} · ${assignedNode.protocol}` : (policy === "direct" ? "本地宽带" : "未分配");
   $("#drawer-info-failure").textContent = failureLabels[device.failure_mode || "block"] || "保持断网";
+  $("#drawer-info-latency-domestic").textContent = assignedNode ? qualityText(assignedNode.latency_domestic_ms, " ms") : "不适用";
+  $("#drawer-info-latency-foreign").textContent = assignedNode ? qualityText(assignedNode.latency_foreign_ms, " ms") : "不适用";
+  $("#drawer-info-download").textContent = assignedNode ? qualityText(
+    Number.isFinite(Number(assignedNode.download_mbps)) && Number(assignedNode.download_mbps) > 0
+      ? Number(assignedNode.download_mbps).toFixed(1)
+      : null,
+    " Mbps",
+  ) : "不适用";
+  $("#drawer-info-loss").textContent = assignedNode ? qualityText(assignedNode.packet_loss_percent, "%") : "不适用";
+  $("#drawer-info-stability").textContent = assignedNode ? qualityText(assignedNode.stability_score, " / 100") : "不适用";
   $("#drawer-egress-ip").textContent = "尚未检测";
   $$("#device-drawer [data-drawer-tab]").forEach((button) => button.classList.toggle("is-active", button.dataset.drawerTab === "settings"));
   $$("#device-drawer [data-drawer-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.drawerPanel !== "settings"));
@@ -898,7 +943,10 @@ async function testNode(button) {
     const result = await api("node_test", { id: button.dataset.id });
     const domestic = result.latency_domestic_ms == null ? "失败" : `${result.latency_domestic_ms} ms`;
     const foreign = result.latency_foreign_ms == null ? "失败" : `${result.latency_foreign_ms} ms`;
-    showToast(`国内（百度）${domestic} · 国外（Google）${foreign}`);
+    const speed = result.download_mbps == null ? "失败" : `${Number(result.download_mbps).toFixed(1)} Mbps`;
+    const loss = result.packet_loss_percent == null ? "未测" : `${result.packet_loss_percent}%`;
+    const stability = result.stability_score == null ? "未测" : `${result.stability_score}/100`;
+    showToast(`国内 ${domestic} · 国外 ${foreign} · 下载 ${speed} · 丢包 ${loss} · 稳定性 ${stability}`);
     await loadAll({ quiet: true });
   } catch (error) { showToast(error.message, true); }
   finally { button.disabled = false; button.textContent = old; }

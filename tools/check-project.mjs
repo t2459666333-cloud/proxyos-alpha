@@ -142,6 +142,9 @@ for (const requiredBehavior of [
   "reauthenticate",
   "latency_domestic_ms",
   "latency_foreign_ms",
+  "download_mbps",
+  "packet_loss_percent",
+  "stability_score",
 ]) {
   if (!appScript.includes(requiredBehavior)) {
     throw new Error(`ProxyOS UI is missing required behavior: ${requiredBehavior}`);
@@ -153,6 +156,7 @@ if (!appScript.includes(version)) {
 for (const requiredProbe of [
   "https://www.baidu.com/favicon.ico",
   "https://www.gstatic.com/generate_204",
+  "https://speed.cloudflare.com/__down?bytes=4000000",
 ]) {
   if (!controller.includes(requiredProbe)) {
     throw new Error(`Controller is missing required latency probe: ${requiredProbe}`);
@@ -160,6 +164,17 @@ for (const requiredProbe of [
 }
 if (!controller.includes("latency_domestic_pid") || !controller.includes("latency_foreign_pid")) {
   throw new Error("Domestic and international latency probes must run in parallel");
+}
+for (const requiredQualityProbe of [
+  "probe_proxy_download_speed",
+  "probe_proxy_quality",
+  "packet_loss_percent",
+  "stability_score",
+  'probe_node_egress "$node_id" full',
+]) {
+  if (!controller.includes(requiredQualityProbe)) {
+    throw new Error(`Controller is missing full node quality probe behavior: ${requiredQualityProbe}`);
+  }
 }
 if (!appStyles.includes(".egress-ip { display: inline;") || !appStyles.includes("font: inherit;")) {
   throw new Error("Exit IP must inherit the local-IP typography");

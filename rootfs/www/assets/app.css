@@ -392,10 +392,28 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--blue); }
 .node-search { width: 235px; }
 .node-search input { padding-left: 40px; padding-right: 12px; }
 .node-search .icon { left: 14px; right: auto; }
+.node-table { min-width: 1420px; }
 .node-table td { height: 70px; }
 .node-name strong { font-size: 13px; }
 .source-label { color: #4b5870; }
 .protocol-pill { min-height: 26px; padding: 0 10px; display: inline-flex; align-items: center; border: 1px solid #c9d7ff; border-radius: 6px; color: var(--blue); background: #f5f8ff; font-size: 11px; }
+.quality-value { display: inline-flex; align-items: baseline; gap: 3px; color: #273650; font-size: 13px; font-weight: 650; white-space: nowrap; }
+.quality-value small { margin: 0; color: #8290a7; font-size: 9px; font-weight: 500; }
+.quality-value.speed { color: var(--blue); }
+.quality-value.good { color: var(--green); }
+.quality-value.warn { color: var(--orange); }
+.quality-value.bad { color: var(--red); }
+.quality-value.muted { color: #a5afbf; font-weight: 500; }
+.quality-badge { min-width: 68px; min-height: 31px; padding: 4px 9px; display: inline-grid; grid-template-columns: auto auto; align-items: center; justify-content: center; gap: 5px; border-radius: 9px; white-space: nowrap; }
+.quality-badge strong { font-size: 13px; }
+.quality-badge small { margin: 0; font-size: 9px; }
+.quality-badge.excellent { color: #208946; background: #eaf8ef; }
+.quality-badge.stable { color: #2f6bff; background: #eef4ff; }
+.quality-badge.warn { color: #c87817; background: #fff5e8; }
+.quality-badge.poor { color: #d24444; background: #fff0f0; }
+.quality-badge.unknown { color: #8a96a9; background: #f2f4f8; font-size: 10px; }
+.node-quality-note { min-height: 43px; padding: 9px 20px; display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); color: #748198; background: #fbfcff; font-size: 10px; }
+.node-quality-note .icon { width: 15px; height: 15px; flex: 0 0 auto; color: var(--blue); }
 .node-actions { display: flex; align-items: center; gap: 10px; min-width: 235px; }
 .text-action { border: 0; background: transparent; color: var(--blue); font-size: 12px; padding: 5px 3px; }
 .text-action.danger { color: var(--red); }

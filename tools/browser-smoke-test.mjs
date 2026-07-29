@@ -123,6 +123,16 @@ await check("device-drawer-and-connection-tab", async () => {
   const ip = (await page.locator("#drawer-info-ip").innerText()).trim();
   const mac = (await page.locator("#drawer-info-mac").innerText()).trim();
   if (!ip || ip === "—" || !mac || mac === "—") throw new Error("connection details are empty");
+  const qualityDetails = await Promise.all([
+    "#drawer-info-latency-domestic",
+    "#drawer-info-latency-foreign",
+    "#drawer-info-download",
+    "#drawer-info-loss",
+    "#drawer-info-stability",
+  ].map(async (selector) => (await page.locator(selector).innerText()).trim()));
+  if (qualityDetails.some((value) => !value || value === "—")) {
+    throw new Error(`device quality details are incomplete: ${qualityDetails.join(" / ")}`);
+  }
   await page.locator("#device-drawer .close-layer").first().click();
   const egressCell = page.locator("#page-devices .egress-ip").first();
   await egressCell.waitFor({ state: "visible", timeout: 5_000 });
@@ -154,10 +164,16 @@ await check("node-modal", async () => {
   await page.locator("#node-modal .close-layer").first().click();
   const flags = await page.locator("#node-table-body .country-flag svg").count();
   if (flags < 1) throw new Error("SVG country flags were not rendered");
+  const headers = await page.locator(".node-table thead th").allInnerTexts();
+  for (const expected of ["国内 / 国外延迟", "实际下载速度", "丢包率", "节点稳定性"]) {
+    if (!headers.includes(expected)) throw new Error(`node metric column is missing: ${expected}`);
+  }
+  const firstRowMetrics = await page.locator("#node-table-body tr").first().locator(".quality-value, .quality-badge").allInnerTexts();
+  if (firstRowMetrics.length < 3) throw new Error(`node quality values are missing: ${firstRowMetrics.join(" / ")}`);
   const visibleRows = await page.locator("#node-table-body tr").count();
   if (visibleRows > 10) throw new Error(`pagination rendered ${visibleRows} rows on a 10-row page`);
   await page.screenshot({ path: resolve("work/ui-nodes.png"), fullPage: true });
-  return `${protocols} protocol choices; ${visibleRows} paginated rows`;
+  return `${protocols} protocol choices; ${visibleRows} paginated rows; ${firstRowMetrics.join(" / ")}`;
 });
 
 await check("node-device-picker", async () => {

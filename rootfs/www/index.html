@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>ProxyOS</title>
-    <link rel="icon" type="image/svg+xml" href="/assets/proxyos-mark.svg?v=0.3.0rc2a" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.3.0rc2a" />
+    <link rel="icon" type="image/svg+xml" href="/assets/proxyos-mark.svg?v=0.3.0rc3b" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.3.0rc3b" />
   </head>
   <body>
     <div id="toast" class="toast" aria-live="polite"></div>
@@ -128,10 +128,11 @@
             </div>
             <div class="table-wrap">
               <table class="data-table node-table">
-                <thead><tr><th>节点名称</th><th>来源</th><th>国家 / 地区</th><th>协议</th><th>国内 / 国外延迟</th><th>状态</th><th>操作</th></tr></thead>
+                <thead><tr><th>节点名称</th><th>来源</th><th>国家 / 地区</th><th>协议</th><th>国内 / 国外延迟</th><th>实际下载速度</th><th>丢包率</th><th>节点稳定性</th><th>状态</th><th>操作</th></tr></thead>
                 <tbody id="node-table-body"></tbody>
               </table>
             </div>
+            <div class="node-quality-note"><span class="icon" data-icon="info"></span><span>“测速”会让请求真实经过所选节点：下载测试约消耗 4 MB 流量，丢包率为连续 5 次代理请求的失败比例，稳定性满分 100。</span></div>
             <div class="table-foot split"><span id="node-count">共 0 条</span><div class="pagination"><button id="node-page-prev" type="button" aria-label="上一页">‹</button><span id="node-page-indicator">第 1 / 1 页</span><button id="node-page-next" type="button" aria-label="下一页">›</button><select id="node-page-size"><option value="10">10 条/页</option><option value="20">20 条/页</option><option value="50">50 条/页</option></select></div></div>
           </article>
         </section>
@@ -233,6 +234,11 @@
             <div class="connection-detail-row"><span>当前策略</span><strong id="drawer-info-policy">—</strong></div>
             <div class="connection-detail-row"><span>分配节点</span><strong id="drawer-info-node">—</strong></div>
             <div class="connection-detail-row"><span>故障处理</span><strong id="drawer-info-failure">—</strong></div>
+            <div class="connection-detail-row"><span>国内延迟</span><strong id="drawer-info-latency-domestic">—</strong></div>
+            <div class="connection-detail-row"><span>国外延迟</span><strong id="drawer-info-latency-foreign">—</strong></div>
+            <div class="connection-detail-row"><span>实际下载速度</span><strong id="drawer-info-download">—</strong></div>
+            <div class="connection-detail-row"><span>丢包率</span><strong id="drawer-info-loss">—</strong></div>
+            <div class="connection-detail-row"><span>节点稳定性</span><strong id="drawer-info-stability">—</strong></div>
           </article>
           <article class="egress-result-card">
             <div><small>公网出口 IP</small><strong id="drawer-egress-ip">尚未检测</strong><span>检测请求由软路由按本设备策略发出</span></div>
@@ -315,6 +321,6 @@
       </section>
     </div>
 
-    <script src="/assets/app.js?v=0.3.0rc2a" type="module"></script>
+    <script src="/assets/app.js?v=0.3.0rc3b" type="module"></script>
   </body>
 </html>

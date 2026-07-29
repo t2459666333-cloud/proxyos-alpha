@@ -16,7 +16,7 @@ PORT_ROLLBACK_CONFIG="/tmp/proxyos-network.rollback"
 VERSION_FILE="${STATE_DIR}/version"
 
 proxyos_version() {
-	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc2'
+	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc3'
 }
 
 json_error() {
@@ -263,6 +263,9 @@ nodes() {
 			latency_ms:(.latency_ms // null),
 			latency_domestic_ms:(.latency_domestic_ms // null),
 			latency_foreign_ms:(.latency_foreign_ms // null),
+			download_mbps:(.download_mbps // null),
+			packet_loss_percent:(.packet_loss_percent // null),
+			stability_score:(.stability_score // null),
 			status:(.status // "unknown"),
 			last_test:(.last_test // 0)
 		})
@@ -375,7 +378,10 @@ node_update() {
 			.status="unknown" |
 			.latency_ms=null |
 			.latency_domestic_ms=null |
-			.latency_foreign_ms=null
+			.latency_foreign_ms=null |
+			.download_mbps=null |
+			.packet_loss_percent=null |
+			.stability_score=null
 		else . end)
 	' "$NODES_FILE" > "$tmp_file"
 	mv "$tmp_file" "$NODES_FILE"
@@ -483,11 +489,12 @@ fetch_public_ip() {
 probe_proxy_latency() {
 	proxy_url="$1"
 	endpoint="$2"
+	max_time="${3:-10}"
 	probe_time="$(
 		curl -4 --fail --silent --show-error --location \
 			--output /dev/null \
 			--proxy "$proxy_url" \
-			--connect-timeout 4 --max-time 10 \
+			--connect-timeout 4 --max-time "$max_time" \
 			--write-out '%{time_starttransfer}' \
 			"$endpoint" 2>/dev/null || true
 	)"
@@ -501,11 +508,82 @@ probe_proxy_latency() {
 	esac
 }
 
+probe_proxy_download_speed() {
+	proxy_url="$1"
+	speed_bytes="$(
+		curl -4 --fail --silent --show-error --location \
+			--output /dev/null \
+			--proxy "$proxy_url" \
+			--connect-timeout 5 --max-time 25 \
+			--write-out '%{speed_download}' \
+			"https://speed.cloudflare.com/__down?bytes=4000000" 2>/dev/null || true
+	)"
+	case "$speed_bytes" in
+		""|0|0.0|0.00|0.000|0.0000)
+			printf 'null\n'
+			;;
+		*)
+			awk "BEGIN {
+				speed = (${speed_bytes} * 8) / 1000000;
+				if (speed > 0) printf \"%.1f\\n\", speed; else print \"null\";
+			}"
+			;;
+	esac
+}
+
+probe_proxy_quality() {
+	proxy_url="$1"
+	attempts=5
+	successes=0
+	samples=""
+	probe_index=0
+	while [ "$probe_index" -lt "$attempts" ]; do
+		sample="$(probe_proxy_latency "$proxy_url" "https://www.gstatic.com/generate_204" 5)"
+		if [ "$sample" != "null" ]; then
+			successes=$((successes + 1))
+			samples="${samples} ${sample}"
+		fi
+		probe_index=$((probe_index + 1))
+	done
+	packet_loss=$(((attempts - successes) * 100 / attempts))
+	if [ "$successes" -eq 0 ]; then
+		printf '%s|0\n' "$packet_loss"
+		return 0
+	fi
+	stability="$(
+		printf '%s\n' "$samples" | awk -v successes="$successes" -v attempts="$attempts" '
+			{
+				for (i = 1; i <= NF; i++) {
+					value[i] = $i
+					sum += $i
+				}
+			}
+			END {
+				mean = sum / successes
+				variance = 0
+				for (i = 1; i <= successes; i++) {
+					delta = value[i] - mean
+					variance += delta * delta
+				}
+				jitter = sqrt(variance / successes)
+				jitter_penalty = jitter / 5
+				if (jitter_penalty > 25) jitter_penalty = 25
+				score = (successes / attempts * 100) - jitter_penalty
+				if (score < 0) score = 0
+				if (score > 100) score = 100
+				printf "%d\n", score + 0.5
+			}
+		'
+	)"
+	printf '%s|%s\n' "$packet_loss" "$stability"
+}
+
 probe_node_egress() {
 	node_id="$1"
+	probe_mode="${2:-quick}"
 	outbound="$(jq -c --arg id "$node_id" '.[] | select(.id == $id) | .outbound' "$NODES_FILE")"
 	[ -n "$outbound" ] || {
-		printf 'error|null|null|null\n'
+		printf 'error|null|null|null|null|null|null\n'
 		return 0
 	}
 	test_port=$((20000 + ($$ % 20000)))
@@ -531,7 +609,7 @@ probe_node_egress() {
 	}' > "$test_config"
 	if ! "$SINGBOX" check -c "$test_config" >"$test_log" 2>&1; then
 		rm -f "$test_config" "$test_log"
-		printf 'error|null|null|null\n'
+		printf 'error|null|null|null|null|null|null\n'
 		return 0
 	fi
 	"$SINGBOX" run -c "$test_config" >"$test_log" 2>&1 &
@@ -548,6 +626,16 @@ probe_node_egress() {
 	wait "$latency_foreign_pid" 2>/dev/null || true
 	latency_domestic="$(cat "$latency_domestic_file" 2>/dev/null || printf 'null')"
 	latency_foreign="$(cat "$latency_foreign_file" 2>/dev/null || printf 'null')"
+	download_mbps="null"
+	packet_loss_percent="null"
+	stability_score="null"
+	if [ "$probe_mode" = "full" ] &&
+		{ [ "$latency_domestic" != "null" ] || [ "$latency_foreign" != "null" ]; }; then
+		quality_result="$(probe_proxy_quality "$proxy_url")"
+		packet_loss_percent="$(printf '%s' "$quality_result" | cut -d '|' -f 1)"
+		stability_score="$(printf '%s' "$quality_result" | cut -d '|' -f 2)"
+		download_mbps="$(probe_proxy_download_speed "$proxy_url")"
+	fi
 	kill "$test_pid" >/dev/null 2>&1 || true
 	wait "$test_pid" 2>/dev/null || true
 	rm -f "$test_config" "$test_log" "$latency_domestic_file" "$latency_foreign_file"
@@ -556,10 +644,12 @@ probe_node_egress() {
 	elif [ "$latency_domestic" != "null" ]; then
 		latency="$latency_domestic"
 	else
-		printf 'error|null|null|null\n'
+		printf 'error|null|null|null|null|null|null\n'
 		return 0
 	fi
-	printf 'available|%s|%s|%s\n' "$latency" "$latency_domestic" "$latency_foreign"
+	printf 'available|%s|%s|%s|%s|%s|%s\n' \
+		"$latency" "$latency_domestic" "$latency_foreign" \
+		"$download_mbps" "$packet_loss_percent" "$stability_score"
 }
 
 save_probe() {
@@ -568,18 +658,27 @@ save_probe() {
 	latency="$3"
 	latency_domestic="$4"
 	latency_foreign="$5"
+	download_mbps="${6:-null}"
+	packet_loss_percent="${7:-null}"
+	stability_score="${8:-null}"
 	now="$(date +%s)"
 	tmp_file="${NODES_FILE}.tmp.$$"
 	jq --arg id "$node_id" --arg status "$status" \
 		--argjson latency "$latency" \
 		--argjson latency_domestic "$latency_domestic" \
 		--argjson latency_foreign "$latency_foreign" \
+		--argjson download_mbps "$download_mbps" \
+		--argjson packet_loss_percent "$packet_loss_percent" \
+		--argjson stability_score "$stability_score" \
 		--argjson now "$now" '
 		map(if .id == $id then
 			.status=$status |
 			.latency_ms=$latency |
 			.latency_domestic_ms=$latency_domestic |
 			.latency_foreign_ms=$latency_foreign |
+			.download_mbps=(if $download_mbps == null then (.download_mbps // null) else $download_mbps end) |
+			.packet_loss_percent=(if $packet_loss_percent == null then (.packet_loss_percent // null) else $packet_loss_percent end) |
+			.stability_score=(if $stability_score == null then (.stability_score // null) else $stability_score end) |
 			.last_test=$now
 		else . end)
 	' "$NODES_FILE" > "$tmp_file"
@@ -595,12 +694,16 @@ node_test() {
 	old_status="$(jq -r --arg id "$node_id" '.[] | select(.id == $id) | .status // "unknown"' "$NODES_FILE")"
 	nodes_rollback="${NODES_FILE}.rollback.$$"
 	cp "$NODES_FILE" "$nodes_rollback"
-	result="$(probe_node_egress "$node_id")"
+	result="$(probe_node_egress "$node_id" full)"
 	status="$(printf '%s' "$result" | cut -d '|' -f 1)"
 	latency="$(printf '%s' "$result" | cut -d '|' -f 2)"
 	latency_domestic="$(printf '%s' "$result" | cut -d '|' -f 3)"
 	latency_foreign="$(printf '%s' "$result" | cut -d '|' -f 4)"
-	save_probe "$node_id" "$status" "$latency" "$latency_domestic" "$latency_foreign"
+	download_mbps="$(printf '%s' "$result" | cut -d '|' -f 5)"
+	packet_loss_percent="$(printf '%s' "$result" | cut -d '|' -f 6)"
+	stability_score="$(printf '%s' "$result" | cut -d '|' -f 7)"
+	save_probe "$node_id" "$status" "$latency" "$latency_domestic" "$latency_foreign" \
+		"$download_mbps" "$packet_loss_percent" "$stability_score"
 	if [ "$status" != "$old_status" ] && ! apply_generated_config_raw; then
 		mv "$nodes_rollback" "$NODES_FILE"
 		json_error "$APPLY_ERROR"
@@ -612,12 +715,18 @@ node_test() {
 			--argjson latency "$latency" \
 			--argjson latency_domestic "$latency_domestic" \
 			--argjson latency_foreign "$latency_foreign" \
+			--argjson download_mbps "$download_mbps" \
+			--argjson packet_loss_percent "$packet_loss_percent" \
+			--argjson stability_score "$stability_score" \
 			'{
 				ok:true,
 				status:"available",
 				latency_ms:$latency,
 				latency_domestic_ms:$latency_domestic,
-				latency_foreign_ms:$latency_foreign
+				latency_foreign_ms:$latency_foreign,
+				download_mbps:$download_mbps,
+				packet_loss_percent:$packet_loss_percent,
+				stability_score:$stability_score
 			}'
 	else
 		jq -n '{
@@ -626,7 +735,10 @@ node_test() {
 			status:"error",
 			latency_ms:null,
 			latency_domestic_ms:null,
-			latency_foreign_ms:null
+			latency_foreign_ms:null,
+			download_mbps:null,
+			packet_loss_percent:100,
+			stability_score:0
 		}'
 	fi
 }
@@ -1630,6 +1742,9 @@ subscription_update() {
 					latency_ms:($previous.latency_ms // null),
 					latency_domestic_ms:($previous.latency_domestic_ms // null),
 					latency_foreign_ms:($previous.latency_foreign_ms // null),
+					download_mbps:($previous.download_mbps // null),
+					packet_loss_percent:($previous.packet_loss_percent // null),
+					stability_score:($previous.stability_score // null),
 					last_test:($previous.last_test // 0)
 				}
 			)
