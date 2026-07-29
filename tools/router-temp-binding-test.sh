@@ -3,8 +3,8 @@ set -eu
 
 STATE_DIR="${1:-/tmp/proxyos-test-state}"
 CTL="${2:-/tmp/proxyosctl-0.2.2}"
-DEVICE_MAC="${3:-F0:4E:A4:40:A1:21}"
-DEVICE_IP="${4:-192.168.10.244}"
+DEVICE_MAC="${3:-02:00:00:00:00:99}"
+DEVICE_IP="${4:-192.168.10.250}"
 
 node_id="$(
 	jq -r '
