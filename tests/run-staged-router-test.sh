@@ -95,6 +95,8 @@ jq -e '
   any(.route.rules[]; .source_ip_cidr == ["192.168.10.202/32"] and .outbound == "node-backup-good") and
   any(.route.rules[]; .source_ip_cidr == ["192.168.10.203/32"] and .action == "reject") and
   any(.route.rules[]; .source_ip_cidr == ["192.168.10.204/32"] and .outbound == "direct") and
+  any(.route.rules[]; .inbound == "proxyos-dns-in" and .action == "hijack-dns") and
+  any(.inbounds[]; .tag == "proxyos-dns-in" and .type == "direct" and .listen_port == 1053) and
   any(.dns.rules[]; .source_ip_cidr == ["192.168.10.201/32"] and .server == "dns-node-backup-good") and
   any(.outbounds[]; .tag == "node-backup-good" and .domain_resolver == "dns-direct") and
   any(.dns.servers[]; .tag == "dns-direct" and .type == "local")

@@ -1,4 +1,4 @@
-# ProxyOS 0.3.0 RC2
+# ProxyOS 0.3.0 RC4
 
 ProxyOS is an x86-64 OpenWrt derivative focused on one job: assigning an
 independent sing-box outbound to every LAN or Wi-Fi client.
@@ -6,7 +6,7 @@ independent sing-box outbound to every LAN or Wi-Fi client.
 This repository contains a reproducible OpenWrt ImageBuilder project. It does
 not contain a renamed stock image or a placeholder firmware file.
 
-## 0.3.0 RC2 scope
+## 0.3.0 RC4 scope
 
 - OpenWrt 25.12.5 x86-64, UEFI and legacy BIOS images
 - A custom responsive Web console
@@ -34,8 +34,10 @@ not contain a renamed stock image or a placeholder firmware file.
   node-resolution failures after a device is assigned to a node
 - Portable first boot with empty user data, stable PCI-path port ordering,
   wireless-interface exclusion, and a safe single-port LAN mode
-- LAN clients receive ProxyOS itself as DNS so per-device DNS policy and leak
-  protection remain effective
+- LAN clients receive ProxyOS itself as DNS, and TCP/UDP port 53 is forcibly
+  redirected to a dedicated sing-box DNS inbound. Client source addresses are
+  preserved, so DNS follows each device's assigned node even when a client
+  hard-codes a public resolver such as `8.8.8.8`.
 - Supported radios are detected on first boot but remain disabled until the
   user explicitly enables Wi-Fi
 - Structured runtime errors for all parameterized Web actions

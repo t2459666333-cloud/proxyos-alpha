@@ -16,7 +16,7 @@ PORT_ROLLBACK_CONFIG="/tmp/proxyos-network.rollback"
 VERSION_FILE="${STATE_DIR}/version"
 
 proxyos_version() {
-	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc3'
+	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc4'
 }
 
 json_error() {
@@ -1189,6 +1189,7 @@ generate_config() {
 			] +
 			($device_rules[0].block // []) +
 			[
+				{inbound:"proxyos-dns-in",action:"hijack-dns"},
 				{protocol:"dns",action:"hijack-dns"},
 				{ip_is_private:true,action:"route",outbound:"direct"}
 			] +

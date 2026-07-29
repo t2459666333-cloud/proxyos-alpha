@@ -28,6 +28,14 @@ function canonicalJson(value) {
 export function buildSingBoxConfig(template, nodes, devices, global = {}) {
   const config = structuredClone(template);
   const nodeIds = new Set(nodes.map((node) => node.id));
+  if (!config.inbounds.some((inbound) => inbound.tag === "proxyos-dns-in")) {
+    config.inbounds.push({
+      type: "direct",
+      tag: "proxyos-dns-in",
+      listen: "0.0.0.0",
+      listen_port: 1053,
+    });
+  }
   config.outbounds = [
     ...nodes.map((node) => ({
       ...structuredClone(node.outbound),
@@ -119,6 +127,7 @@ export function buildSingBoxConfig(template, nodes, devices, global = {}) {
     rules: [
       { action: "sniff" },
       ...blockRules,
+      { inbound: "proxyos-dns-in", action: "hijack-dns" },
       { protocol: "dns", action: "hijack-dns" },
       {
         ip_is_private: true,

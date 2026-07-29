@@ -61,6 +61,18 @@ test("one process can route different source devices to different outbounds", ()
   assert.equal(hkRule.outbound, "node-hk01");
   assert.equal(usRule.outbound, "node-us02");
   assert.equal(config.outbounds.length, 3);
+  assert.ok(
+    config.inbounds.some(
+      (inbound) =>
+        inbound.tag === "proxyos-dns-in" && inbound.listen_port === 1053,
+    ),
+  );
+  assert.ok(
+    config.route.rules.some(
+      (rule) =>
+        rule.inbound === "proxyos-dns-in" && rule.action === "hijack-dns",
+    ),
+  );
   assert.equal(config.dns.rules[0].server, "dns-node-hk01");
   assert.equal(config.dns.rules[1].server, "dns-node-us02");
 });

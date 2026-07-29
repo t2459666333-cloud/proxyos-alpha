@@ -1,0 +1,5 @@
+# Keep LAN DNS on the same per-device path as web traffic.  Redirect both
+# router-addressed DNS and hard-coded public DNS servers to sing-box's
+# dedicated DNS inbound; the original client source address is preserved.
+iifname { "br-lan", "br-guest" } udp dport 53 redirect to :1053
+iifname { "br-lan", "br-guest" } tcp dport 53 redirect to :1053
