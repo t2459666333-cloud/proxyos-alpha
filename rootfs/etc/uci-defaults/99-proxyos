@@ -11,6 +11,10 @@ physical_interfaces() {
 		esac
 		[ "$(cat "${net_path}/type" 2>/dev/null || true)" = "1" ] || continue
 		[ -e "${net_path}/device" ] || continue
+		# A wireless station also reports ARPHRD_ETHER and has a device
+		# symlink. Never let it become the default WAN or a LAN bridge member.
+		[ ! -e "${net_path}/phy80211" ] || continue
+		[ ! -d "${net_path}/wireless" ] || continue
 		device_path="$(readlink -f "${net_path}/device" 2>/dev/null || printf '%s' "$iface")"
 		printf '%s|%s\n' "$device_path" "$iface"
 	done | sort | cut -d '|' -f 2
@@ -59,6 +63,7 @@ if [ "$port_count" -ge 2 ]; then
 else
 	only_port="$(printf '%s\n' "$ports" | sed -n '1p')"
 	uci -q batch <<-EOF
+		delete network.wan
 		set network.br_lan='device'
 		set network.br_lan.name='br-lan'
 		set network.br_lan.type='bridge'
@@ -77,7 +82,9 @@ uci set dhcp.lan.start='100'
 uci set dhcp.lan.limit='150'
 uci set dhcp.lan.leasetime='12h'
 uci -q delete dhcp.lan.dhcp_option
-uci add_list dhcp.lan.dhcp_option='6,1.1.1.1'
+# LAN clients must use ProxyOS for DNS so device policy and leak protection
+# remain effective. The address is intentionally the stable management IP.
+uci add_list dhcp.lan.dhcp_option='6,192.168.10.1'
 uci set dhcp.lan.ra='disabled'
 uci set dhcp.lan.dhcpv6='disabled'
 uci set dhcp.lan.ndp='disabled'
@@ -90,6 +97,18 @@ uci set uhttpd.main.home='/www'
 uci set uhttpd.main.ubus_prefix='/ubus'
 uci set uhttpd.main.rfc1918_filter='1'
 uci commit uhttpd
+
+# Generate radio sections when a supported adapter exists, but keep every
+# radio disabled until the user explicitly enables Wi-Fi in the ProxyOS UI.
+if [ -d /sys/class/ieee80211 ] &&
+	ls /sys/class/ieee80211/* >/dev/null 2>&1 &&
+	! uci -q show wireless | grep -q '=wifi-device$'; then
+	wifi config >/dev/null 2>&1 || true
+fi
+for radio in $(uci -q show wireless | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p"); do
+	uci set "wireless.${radio}.disabled=1"
+done
+uci commit wireless
 
 /etc/init.d/sing-box disable >/dev/null 2>&1 || true
 /etc/init.d/proxyos enable

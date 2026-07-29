@@ -308,6 +308,13 @@ code { padding: 2px 6px; border-radius: 5px; background: #f0f3f9; color: #45536d
 .connection-cell span:last-child { color: #3c4860; }
 .latency { white-space: nowrap; color: var(--green); }
 .latency.warn { color: var(--orange); }
+.latency-pair { display: inline-grid; gap: 3px; min-width: 106px; white-space: nowrap; }
+.latency-line { display: grid; grid-template-columns: 28px auto 18px; align-items: center; gap: 5px; }
+.latency-line small { color: #8a96aa; font-size: 10px; font-weight: 500; }
+.latency-line strong { color: var(--green); font-size: 12px; font-weight: 500; }
+.latency-line strong.warn { color: var(--orange); }
+.latency-line .signal-bars { margin-left: 0; }
+.average-latency { font-size: 17px !important; line-height: 1.42; }
 .signal-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 16px; margin-left: 8px; }
 .signal-bars i { width: 3px; background: currentColor; border-radius: 1px; }
 .signal-bars i:nth-child(1) { height: 5px; }.signal-bars i:nth-child(2) { height: 9px; }.signal-bars i:nth-child(3) { height: 13px; }
@@ -343,7 +350,7 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--blue); }
 .device-row-checkbox { width: 17px !important; height: 17px !important; }
 .device-table td { height: 79px; }
 .device-table tr.is-selected { background: #f3f7ff; }
-.egress-ip { display: inline-flex; min-width: 88px; color: #315caa; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 11px; white-space: nowrap; }
+.egress-ip { display: inline; min-width: 0; color: inherit; font: inherit; font-weight: 400; white-space: nowrap; }
 .egress-ip.is-error { color: var(--red); }
 
 .node-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 22px; margin-bottom: 24px; }

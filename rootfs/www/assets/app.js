@@ -1,7 +1,17 @@
 const ZERO_SESSION = "00000000000000000000000000000000";
 
+class SessionExpiredError extends Error {
+  constructor() {
+    super("登录会话已过期，请重新登录");
+    this.name = "SessionExpiredError";
+    this.code = "SESSION_EXPIRED";
+  }
+}
+
 const state = {
   session: sessionStorage.getItem("proxyos_session") || "",
+  credentials: null,
+  reauthPromise: null,
   page: "dashboard",
   status: {},
   devices: [],
@@ -99,7 +109,33 @@ function showToast(message, error = false) {
   showToast.timer = setTimeout(() => toast.classList.remove("is-visible"), 3200);
 }
 
-async function ubusCall(object, method, payload = {}, session = state.session, timeoutMs = 30000) {
+async function reauthenticate() {
+  if (!state.credentials) throw new SessionExpiredError();
+  if (state.reauthPromise) return state.reauthPromise;
+  const active = (async () => {
+    const { username, password } = state.credentials;
+    const result = await ubusCall(
+      "session",
+      "login",
+      { username, password, timeout: 86400 },
+      ZERO_SESSION,
+      30000,
+      false,
+    );
+    if (!result.ubus_rpc_session) throw new SessionExpiredError();
+    state.session = result.ubus_rpc_session;
+    sessionStorage.setItem("proxyos_session", state.session);
+    return state.session;
+  })();
+  state.reauthPromise = active;
+  try {
+    return await active;
+  } finally {
+    if (state.reauthPromise === active) state.reauthPromise = null;
+  }
+}
+
+async function ubusCall(object, method, payload = {}, session = state.session, timeoutMs = 30000, allowReauth = true) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
@@ -116,12 +152,25 @@ async function ubusCall(object, method, payload = {}, session = state.session, t
   } finally {
     clearTimeout(timeout);
   }
+  if (response.status === 403) {
+    if (allowReauth && object !== "session" && state.credentials) {
+      await reauthenticate();
+      return ubusCall(object, method, payload, state.session, timeoutMs, false);
+    }
+    throw new SessionExpiredError();
+  }
   if (!response.ok) throw new Error(`管理接口返回 ${response.status}`);
   const envelope = await response.json();
   if (envelope.error) throw new Error(envelope.error.message || "RPC 请求失败");
   const [code, data] = envelope.result || [];
   if (code !== 0) {
-    if (code === 6 || code === 9) throw new Error("登录已过期，请重新登录");
+    if (code === 6 || code === 9) {
+      if (allowReauth && object !== "session" && state.credentials) {
+        await reauthenticate();
+        return ubusCall(object, method, payload, state.session, timeoutMs, false);
+      }
+      throw new SessionExpiredError();
+    }
     throw new Error(data?.error || `RPC 错误 ${code}`);
   }
   if (data?.ok === false) throw new Error(data.error || "操作失败");
@@ -134,8 +183,9 @@ const api = (method, payload = {}) =>
 const unwrapItems = (value) => (Array.isArray(value?.items) ? value.items : Array.isArray(value) ? value : []);
 
 async function login(username, password) {
-  const result = await ubusCall("session", "login", { username, password }, ZERO_SESSION);
+  const result = await ubusCall("session", "login", { username, password, timeout: 86400 }, ZERO_SESSION, 30000, false);
   if (!result.ubus_rpc_session) throw new Error("未获得登录会话");
+  state.credentials = { username, password };
   state.session = result.ubus_rpc_session;
   sessionStorage.setItem("proxyos_session", state.session);
   $("#login-screen").classList.add("is-hidden");
@@ -146,6 +196,8 @@ async function login(username, password) {
 
 function logout() {
   state.session = "";
+  state.credentials = null;
+  state.reauthPromise = null;
   state.loading = false;
   sessionStorage.removeItem("proxyos_session");
   $("#app-shell").classList.add("is-hidden");
@@ -153,50 +205,66 @@ function logout() {
   $("#login-password").value = "";
 }
 
-async function loadAll({ quiet = false } = {}) {
+async function loadAll({ quiet = false, full = true } = {}) {
   if (state.loading) return;
   state.loading = true;
-  const requests = [
+  const coreRequests = [
     ["status", "status"],
     ["devices", "devices"],
     ["nodes", "nodes"],
     ["wifi", "wifi_status"],
+  ];
+  const fullRequests = [
     ["wifiConfig", "wifi_config"],
     ["ports", "ports"],
     ["subscriptions", "subscriptions"],
     ["policy", "policy_settings"],
   ];
+  const requests = full ? [...coreRequests, ...fullRequests] : coreRequests;
   // rpcd launches one controller process per method. Serial reads avoid
   // exhausting a small router and make each refresh deterministic.
   const results = [];
-  for (const [, method] of requests) {
-    try {
-      results.push({ status: "fulfilled", value: await api(method) });
-    } catch (reason) {
-      results.push({ status: "rejected", reason });
+  try {
+    for (const [, method] of requests) {
+      try {
+        results.push({ status: "fulfilled", value: await api(method) });
+      } catch (reason) {
+        if (reason?.code === "SESSION_EXPIRED") {
+          logout();
+          if (!quiet) showToast(reason.message, true);
+          return;
+        }
+        results.push({ status: "rejected", reason });
+      }
     }
+    let hadError = false;
+    results.forEach((result, index) => {
+      const [key] = requests[index];
+      if (result.status === "fulfilled") state[key] = ["devices", "nodes", "ports", "subscriptions"].includes(key) ? unwrapItems(result.value) : result.value;
+      else {
+        hadError = true;
+        console.error(`${key}:`, result.reason);
+      }
+    });
+    renderAll();
+    scheduleEgressChecks();
+    if (!quiet) showToast(hadError ? "部分状态读取失败，系统将自动重试" : "状态已更新", hadError);
+  } finally {
+    state.loading = false;
   }
-  let hadError = false;
-  results.forEach((result, index) => {
-    const [key] = requests[index];
-    if (result.status === "fulfilled") state[key] = ["devices", "nodes", "ports", "subscriptions"].includes(key) ? unwrapItems(result.value) : result.value;
-    else {
-      hadError = true;
-      if (String(result.reason?.message).includes("登录已过期")) logout();
-      console.error(`${key}:`, result.reason);
-    }
-  });
-  renderAll();
-  state.loading = false;
-  scheduleEgressChecks();
-  if (!quiet) showToast(hadError ? "部分状态读取失败" : "状态已更新", hadError);
 }
 
 function startRefreshLoop() {
   if (state.refreshTimer) return;
   state.refreshTimer = setInterval(() => {
-    if (state.session) loadAll({ quiet: true });
-  }, 15000);
+    if (state.session && !document.hidden) loadAll({ quiet: true, full: false });
+  }, 30000);
+  document.addEventListener("visibilitychange", () => {
+    if (state.session && !document.hidden) loadAll({ quiet: true, full: true });
+  });
+  window.addEventListener("online", () => {
+    if (state.session) loadAll({ quiet: true, full: false });
+  });
 }
 
 async function scheduleEgressChecks() {
@@ -313,6 +381,17 @@ function deviceStatus(device) {
   return device.online ? ["online", "在线"] : ["offline", "离线"];
 }
 function latencyFor(device) { return nodeFor(device)?.latency_ms ?? null; }
+function latencyPairMarkup(node, includeSignal = false) {
+  const domestic = node?.latency_domestic_ms ?? null;
+  const foreign = node?.latency_foreign_ms ?? null;
+  const line = (label, value) => {
+    const numeric = Number(value);
+    const available = Number.isFinite(numeric) && numeric > 0;
+    const warning = available && numeric > 120;
+    return `<span class="latency-line"><small>${label}</small><strong class="${warning ? "warn" : ""}">${available ? `${numeric} ms` : "—"}</strong>${includeSignal && available ? signalMarkup(numeric) : ""}</span>`;
+  };
+  return `<span class="latency-pair">${line("国内", domestic)}${line("国外", foreign)}</span>`;
+}
 function egressIpFor(device) {
   return state.egressByDevice.get(device.mac) || device.egress_ip || "";
 }
@@ -352,7 +431,6 @@ function renderMetricCards() {
 function deviceRow(device, dashboard = false) {
   const node = nodeFor(device);
   const [statusClass, statusLabel] = deviceStatus(device);
-  const latency = latencyFor(device);
   const [countryCode] = countryFor(node);
   const connection = isWifiDevice(device) ? "Wi‑Fi 5GHz" : "LAN";
   const protocol = device.policy === "direct" ? "DIRECT" : node?.protocol || (device.policy === "block" ? "Blocked" : "系统策略");
@@ -362,7 +440,7 @@ function deviceRow(device, dashboard = false) {
       <td>${escapeHtml(device.ip || "—")}</td>
       <td><div class="connection-cell ${isWifiDevice(device) ? "wifi" : "lan"}"><span class="icon" data-icon="${isWifiDevice(device) ? "wifi" : "network"}"></span><span>${connection}</span></div></td>
       <td><div class="node-cell">${device.policy === "direct" ? flagMarkup("unknown") : device.policy === "block" ? '<span class="policy-stop">!</span>' : flagMarkup(countryCode)}<div><strong>${escapeHtml(egressFor(device))}</strong><small>${escapeHtml(protocol)}</small></div></div></td>
-      <td><span class="latency ${latency > 80 ? "warn" : ""}">${latency == null ? "—" : `${latency} ms`}${signalMarkup(latency)}</span></td>
+      <td>${latencyPairMarkup(node, true)}</td>
       <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
       <td><div class="table-actions"><button class="row-action edit-device" data-mac="${escapeHtml(device.mac)}"><span class="icon" data-icon="refresh"></span>更换节点</button><button class="row-action egress-check" data-mac="${escapeHtml(device.mac)}"><span class="icon" data-icon="target"></span>出口检测</button><button class="more-button edit-device" data-mac="${escapeHtml(device.mac)}" title="打开设备详情">⋮</button></div></td>
     </tr>`;
@@ -375,7 +453,7 @@ function deviceRow(device, dashboard = false) {
       <td><div class="node-cell">${device.policy === "direct" ? flagMarkup("unknown") : device.policy === "block" ? '<span class="policy-stop">!</span>' : flagMarkup(countryCode)}<div><strong>${escapeHtml(egressFor(device))}</strong><small>${escapeHtml(node?.source_type === "subscription" ? "订阅节点" : node ? "手动节点" : policyLabel(device.policy))}</small></div></div></td>
       <td><span class="egress-ip ${egressIpFor(device) === "检测失败" ? "is-error" : ""}">${escapeHtml(egressIpFor(device) || (device.policy === "block" ? "已阻断" : "待检测"))}</span></td>
       <td>${escapeHtml(protocol)}</td>
-      <td><span class="latency ${latency > 80 ? "warn" : ""}">${latency == null ? "—" : `${latency} ms`}${signalMarkup(latency)}</span></td>
+      <td>${latencyPairMarkup(node, true)}</td>
       <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
       <td><button class="more-button edit-device" data-mac="${escapeHtml(device.mac)}">⋯</button></td>
     </tr>`;
@@ -427,15 +505,17 @@ function bindDynamicDeviceActions() {
 
 function renderNodeMetrics() {
   const available = state.nodes.filter((node) => node.status !== "error").length;
-  const latencies = state.nodes.map((node) => Number(node.latency_ms)).filter((value) => value > 0);
-  const average = latencies.length ? Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length) : 0;
+  const domesticLatencies = state.nodes.map((node) => Number(node.latency_domestic_ms)).filter((value) => value > 0);
+  const foreignLatencies = state.nodes.map((node) => Number(node.latency_foreign_ms)).filter((value) => value > 0);
+  const domesticAverage = domesticLatencies.length ? Math.round(domesticLatencies.reduce((sum, value) => sum + value, 0) / domesticLatencies.length) : 0;
+  const foreignAverage = foreignLatencies.length ? Math.round(foreignLatencies.reduce((sum, value) => sum + value, 0) / foreignLatencies.length) : 0;
   const protocols = new Map();
   state.nodes.forEach((node) => protocols.set(node.protocol, (protocols.get(node.protocol) || 0) + 1));
   const distribution = [...protocols.entries()].slice(0, 4);
   $("#node-metrics").innerHTML = `
     <article class="node-stat"><span class="node-stat-icon blue"><span class="icon" data-icon="database"></span></span><div class="node-stat-copy"><span>总节点数</span><strong>${state.nodes.length}</strong><small>手动与订阅节点</small></div></article>
     <article class="node-stat"><span class="node-stat-icon green"><span class="icon" data-icon="check-circle"></span></span><div class="node-stat-copy"><span>可用节点</span><strong>${available}</strong><small>可用率 ${state.nodes.length ? ((available / state.nodes.length) * 100).toFixed(1) : "0.0"}%</small></div></article>
-    <article class="node-stat"><span class="node-stat-icon violet"><span class="icon" data-icon="zap"></span></span><div class="node-stat-copy"><span>平均延迟</span><strong>${average || "—"}${average ? " ms" : ""}</strong><small>基于最近一次测试</small></div></article>
+    <article class="node-stat"><span class="node-stat-icon violet"><span class="icon" data-icon="zap"></span></span><div class="node-stat-copy"><span>平均延迟</span><strong class="average-latency">国内 ${domesticAverage || "—"}${domesticAverage ? " ms" : ""}<br>国外 ${foreignAverage || "—"}${foreignAverage ? " ms" : ""}</strong><small>百度 / Google 双线路测试</small></div></article>
     <article class="node-stat"><span class="node-stat-icon orange"><span class="icon" data-icon="pie"></span></span><div class="node-stat-copy"><span>协议分布</span><div class="protocol-mini">${distribution.length ? distribution.map(([name,count], index) => `<span><i style="background:${["#2f6bff","#2da860","#ee5b5b","#aeb8ca"][index]}"></i>${escapeHtml(name)}</span><strong>${count}</strong>`).join("") : "<small>暂无节点</small>"}</div></div></article>`;
 }
 
@@ -469,13 +549,12 @@ function renderNodes() {
   const nodes = filteredNodes();
   $("#node-table-body").innerHTML = nodes.length ? nodes.map((node) => {
     const [countryCode, country] = countryFor(node);
-    const latency = node.latency_ms;
     return `<tr>
       <td><div class="node-name"><strong>${escapeHtml(cleanNodeName(node.name))}</strong><small>${escapeHtml(node.server || "服务器地址已保护")}</small></div></td>
       <td><span class="source-label">${node.source_type === "subscription" ? escapeHtml(subscriptionForNode(node)?.name || "其他订阅") : "手动节点"}</span></td>
       <td><div class="country-cell">${flagMarkup(countryCode)}<span>${country}</span></div></td>
       <td><span class="protocol-pill">${escapeHtml(node.protocol)}</span></td>
-      <td><span class="latency ${latency > 80 ? "warn" : ""}">${latency == null ? "—" : `${latency} ms`}</span></td>
+      <td>${latencyPairMarkup(node)}</td>
       <td><span class="status-badge ${node.status === "error" ? "blocked" : "online"}">${node.status === "error" ? "异常" : "可用"}</span></td>
       <td><div class="node-actions"><button class="text-action edit-node" data-id="${escapeHtml(node.id)}">编辑</button><button class="text-action test-node" data-id="${escapeHtml(node.id)}">测速</button><button class="text-action assign-node" data-id="${escapeHtml(node.id)}">分配设备</button><button class="more-button delete-node" data-id="${escapeHtml(node.id)}">⋮</button></div></td>
     </tr>`;
@@ -577,13 +656,13 @@ function renderPolicies() {
 
 function renderSystem() {
   const healthy = Boolean(state.status.singbox_running);
-  $("#system-version").textContent = state.status.version || "0.2.2-alpha";
+  $("#system-version").textContent = state.status.version || "0.3.0-rc1";
   $("#system-model").textContent = state.status.model || "x86-64";
   $("#system-kernel").textContent = state.status.kernel || "—";
   $("#system-core").textContent = healthy ? "运行正常" : "未运行";
   $("#sidebar-core-text").textContent = healthy ? "系统运行正常" : "代理核心异常";
   $("#sidebar-uptime").textContent = formatUptime(state.status.uptime);
-  $("#sidebar-version").textContent = state.status.version || "0.2.2-alpha";
+  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc1";
   $("#sidebar-kernel").textContent = state.status.kernel || "—";
   ["#global-health", "#system-health-pill"].forEach((selector) => {
     const pill = $(selector);
@@ -803,7 +882,9 @@ async function testNode(button) {
   button.textContent = "测试中";
   try {
     const result = await api("node_test", { id: button.dataset.id });
-    showToast(result.latency_ms != null ? `节点延迟 ${result.latency_ms} ms` : "节点连接测试完成");
+    const domestic = result.latency_domestic_ms == null ? "失败" : `${result.latency_domestic_ms} ms`;
+    const foreign = result.latency_foreign_ms == null ? "失败" : `${result.latency_foreign_ms} ms`;
+    showToast(`国内（百度）${domestic} · 国外（Google）${foreign}`);
     await loadAll({ quiet: true });
   } catch (error) { showToast(error.message, true); }
   finally { button.disabled = false; button.textContent = old; }

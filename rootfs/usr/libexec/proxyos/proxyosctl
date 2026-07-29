@@ -13,6 +13,11 @@ PYTHON="${PROXYOS_PYTHON:-python3}"
 SINGBOX="${PROXYOS_SINGBOX:-/usr/bin/sing-box}"
 PORT_ROLLBACK_FLAG="/tmp/proxyos-port-rollback.pending"
 PORT_ROLLBACK_CONFIG="/tmp/proxyos-network.rollback"
+VERSION_FILE="${STATE_DIR}/version"
+
+proxyos_version() {
+	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc1'
+}
 
 json_error() {
 	printf '{"ok":false,"error":%s}\n' "$(printf '%s' "$1" | jq -Rs .)"
@@ -82,6 +87,8 @@ physical_interfaces() {
 		esac
 		[ "$(cat "${net_path}/type" 2>/dev/null || true)" = "1" ] || continue
 		[ -e "${net_path}/device" ] || continue
+		[ ! -e "${net_path}/phy80211" ] || continue
+		[ ! -d "${net_path}/wireless" ] || continue
 		device_path="$(readlink -f "${net_path}/device" 2>/dev/null || printf '%s' "$iface")"
 		printf '%s|%s\n' "$device_path" "$iface"
 	done | sort | cut -d '|' -f 2
@@ -124,6 +131,7 @@ wifi_status() {
 status() {
 	system_info="$(ubus call system info 2>/dev/null || printf '{}')"
 	board_info="$(ubus call system board 2>/dev/null || printf '{}')"
+	version="$(proxyos_version)"
 	node_count="$(jq 'length' "$NODES_FILE")"
 	bound_count="$(jq '[.[] | select(.policy == "fixed_node" or .policy == "auto_node")] | length' "$DEVICES_FILE")"
 	singbox_running=false
@@ -134,11 +142,12 @@ status() {
 	jq -n \
 		--argjson system "$system_info" \
 		--argjson board "$board_info" \
+		--arg version "$version" \
 		--argjson nodes "$node_count" \
 		--argjson bound "$bound_count" \
 		--argjson running "$singbox_running" \
 		'{
-			version:"0.2.2-alpha",
+			version:$version,
 			hostname:($board.hostname // "ProxyOS"),
 			model:($board.model // "x86-64"),
 			kernel:($board.kernel // ""),
@@ -248,6 +257,8 @@ nodes() {
 			server_port:(.outbound.server_port // 0),
 			enabled:(.enabled // true),
 			latency_ms:(.latency_ms // null),
+			latency_domestic_ms:(.latency_domestic_ms // null),
+			latency_foreign_ms:(.latency_foreign_ms // null),
 			status:(.status // "unknown"),
 			last_test:(.last_test // 0)
 		})
@@ -358,7 +369,9 @@ node_update() {
 			.name=$name |
 			.outbound=$outbound |
 			.status="unknown" |
-			.latency_ms=null
+			.latency_ms=null |
+			.latency_domestic_ms=null |
+			.latency_foreign_ms=null
 		else . end)
 	' "$NODES_FILE" > "$tmp_file"
 	mv "$tmp_file" "$NODES_FILE"
@@ -463,11 +476,32 @@ fetch_public_ip() {
 	return 1
 }
 
+probe_proxy_latency() {
+	proxy_url="$1"
+	endpoint="$2"
+	probe_time="$(
+		curl -4 --fail --silent --show-error --location \
+			--output /dev/null \
+			--proxy "$proxy_url" \
+			--connect-timeout 4 --max-time 10 \
+			--write-out '%{time_total}' \
+			"$endpoint" 2>/dev/null || true
+	)"
+	case "$probe_time" in
+		""|0|0.0|0.00|0.000|0.0000|0.00000|0.000000)
+			printf 'null\n'
+			;;
+		*)
+			awk "BEGIN { printf \"%d\\n\", (${probe_time} * 1000) }"
+			;;
+	esac
+}
+
 probe_node_egress() {
 	node_id="$1"
 	outbound="$(jq -c --arg id "$node_id" '.[] | select(.id == $id) | .outbound' "$NODES_FILE")"
 	[ -n "$outbound" ] || {
-		printf 'error|null\n'
+		printf 'error|null|null|null\n'
 		return 0
 	}
 	test_port=$((20000 + ($$ % 20000)))
@@ -476,43 +510,72 @@ probe_node_egress() {
 	jq -n --argjson outbound "$outbound" --argjson port "$test_port" '{
 		log:{level:"error"},
 		inbounds:[{type:"mixed",tag:"test-in",listen:"127.0.0.1",listen_port:$port}],
-		outbounds:[($outbound + {tag:"test-node"}),{type:"direct",tag:"direct"}],
-		route:{rules:[],final:"test-node"}
+		outbounds:[
+			($outbound + {tag:"test-node",domain_resolver:"dns-direct"}),
+			{type:"direct",tag:"direct"}
+		],
+		dns:{
+			servers:[{type:"local",tag:"dns-direct"}],
+			final:"dns-direct",
+			strategy:"ipv4_only"
+		},
+		route:{
+			default_domain_resolver:"dns-direct",
+			rules:[],
+			final:"test-node"
+		}
 	}' > "$test_config"
 	if ! "$SINGBOX" check -c "$test_config" >"$test_log" 2>&1; then
 		rm -f "$test_config" "$test_log"
-		printf 'error|null\n'
+		printf 'error|null|null|null\n'
 		return 0
 	fi
 	"$SINGBOX" run -c "$test_config" >"$test_log" 2>&1 &
 	test_pid="$!"
 	sleep 1
-	probe_result="$(fetch_public_ip "socks5h://127.0.0.1:${test_port}" || true)"
+	proxy_url="socks5h://127.0.0.1:${test_port}"
+	latency_domestic_file="/tmp/proxyos-latency-domestic.$$.txt"
+	latency_foreign_file="/tmp/proxyos-latency-foreign.$$.txt"
+	probe_proxy_latency "$proxy_url" "https://www.baidu.com/" > "$latency_domestic_file" &
+	latency_domestic_pid="$!"
+	probe_proxy_latency "$proxy_url" "https://www.gstatic.com/generate_204" > "$latency_foreign_file" &
+	latency_foreign_pid="$!"
+	wait "$latency_domestic_pid" 2>/dev/null || true
+	wait "$latency_foreign_pid" 2>/dev/null || true
+	latency_domestic="$(cat "$latency_domestic_file" 2>/dev/null || printf 'null')"
+	latency_foreign="$(cat "$latency_foreign_file" 2>/dev/null || printf 'null')"
 	kill "$test_pid" >/dev/null 2>&1 || true
 	wait "$test_pid" 2>/dev/null || true
-	rm -f "$test_config" "$test_log"
-	case "$probe_result" in
-		""|*\|)
-			printf 'error|null\n'
-			;;
-		*)
-			probe_time="${probe_result#*|}"
-			latency="$(awk "BEGIN { printf \"%d\", (${probe_time} * 1000) }")"
-			printf 'available|%s\n' "$latency"
-			;;
-	esac
+	rm -f "$test_config" "$test_log" "$latency_domestic_file" "$latency_foreign_file"
+	if [ "$latency_foreign" != "null" ]; then
+		latency="$latency_foreign"
+	elif [ "$latency_domestic" != "null" ]; then
+		latency="$latency_domestic"
+	else
+		printf 'error|null|null|null\n'
+		return 0
+	fi
+	printf 'available|%s|%s|%s\n' "$latency" "$latency_domestic" "$latency_foreign"
 }
 
 save_probe() {
 	node_id="$1"
 	status="$2"
 	latency="$3"
+	latency_domestic="$4"
+	latency_foreign="$5"
 	now="$(date +%s)"
 	tmp_file="${NODES_FILE}.tmp.$$"
-	jq --arg id "$node_id" --arg status "$status" --argjson latency "$latency" --argjson now "$now" '
+	jq --arg id "$node_id" --arg status "$status" \
+		--argjson latency "$latency" \
+		--argjson latency_domestic "$latency_domestic" \
+		--argjson latency_foreign "$latency_foreign" \
+		--argjson now "$now" '
 		map(if .id == $id then
 			.status=$status |
 			.latency_ms=$latency |
+			.latency_domestic_ms=$latency_domestic |
+			.latency_foreign_ms=$latency_foreign |
 			.last_test=$now
 		else . end)
 	' "$NODES_FILE" > "$tmp_file"
@@ -529,9 +592,11 @@ node_test() {
 	nodes_rollback="${NODES_FILE}.rollback.$$"
 	cp "$NODES_FILE" "$nodes_rollback"
 	result="$(probe_node_egress "$node_id")"
-	status="${result%%|*}"
-	latency="${result#*|}"
-	save_probe "$node_id" "$status" "$latency"
+	status="$(printf '%s' "$result" | cut -d '|' -f 1)"
+	latency="$(printf '%s' "$result" | cut -d '|' -f 2)"
+	latency_domestic="$(printf '%s' "$result" | cut -d '|' -f 3)"
+	latency_foreign="$(printf '%s' "$result" | cut -d '|' -f 4)"
+	save_probe "$node_id" "$status" "$latency" "$latency_domestic" "$latency_foreign"
 	if [ "$status" != "$old_status" ] && ! apply_generated_config_raw; then
 		mv "$nodes_rollback" "$NODES_FILE"
 		json_error "$APPLY_ERROR"
@@ -539,9 +604,26 @@ node_test() {
 	rm -f "$nodes_rollback"
 
 	if [ "$status" = "available" ]; then
-		jq -n --argjson latency "$latency" '{ok:true,status:"available",latency_ms:$latency}'
+		jq -n \
+			--argjson latency "$latency" \
+			--argjson latency_domestic "$latency_domestic" \
+			--argjson latency_foreign "$latency_foreign" \
+			'{
+				ok:true,
+				status:"available",
+				latency_ms:$latency,
+				latency_domestic_ms:$latency_domestic,
+				latency_foreign_ms:$latency_foreign
+			}'
 	else
-		jq -n '{ok:false,error:"Node connection timed out",status:"error",latency_ms:null}'
+		jq -n '{
+			ok:false,
+			error:"Baidu and Google latency checks both failed",
+			status:"error",
+			latency_ms:null,
+			latency_domestic_ms:null,
+			latency_foreign_ms:null
+		}'
 	fi
 }
 
@@ -550,7 +632,11 @@ health_check() {
 	health_snapshot="/tmp/proxyos-health-snapshot.$$.json"
 	health_updates="/tmp/proxyos-health-updates.$$.jsonl"
 	health_cursor_file="/tmp/proxyos-health.cursor"
-	health_batch_size="${PROXYOS_HEALTH_BATCH_SIZE:-8}"
+	health_batch_size="${PROXYOS_HEALTH_BATCH_SIZE:-$(uci -q get proxyos.main.health_batch_size || printf '4')}"
+	case "$health_batch_size" in
+		''|*[!0-9]*) health_batch_size=4 ;;
+	esac
+	[ "$health_batch_size" -gt 0 ] || health_batch_size=4
 	cp "$NODES_FILE" "$health_snapshot"
 	: > "$health_updates"
 	health_node_count="$(jq 'length' "$health_snapshot")"
@@ -567,12 +653,24 @@ health_check() {
 		node_id="$(jq -r --argjson index "$health_index" '.[$index].id' "$health_snapshot")"
 		old_status="$(jq -r --arg id "$node_id" '.[] | select(.id == $id) | .status // "unknown"' "$health_snapshot")"
 		result="$(probe_node_egress "$node_id")"
-		new_status="${result%%|*}"
-		latency="${result#*|}"
+		new_status="$(printf '%s' "$result" | cut -d '|' -f 1)"
+		latency="$(printf '%s' "$result" | cut -d '|' -f 2)"
+		latency_domestic="$(printf '%s' "$result" | cut -d '|' -f 3)"
+		latency_foreign="$(printf '%s' "$result" | cut -d '|' -f 4)"
 		now="$(date +%s)"
 		jq -nc --arg id "$node_id" --arg status "$new_status" \
-			--argjson latency "$latency" --argjson now "$now" \
-			'{id:$id,status:$status,latency_ms:$latency,last_test:$now}' >> "$health_updates"
+			--argjson latency "$latency" \
+			--argjson latency_domestic "$latency_domestic" \
+			--argjson latency_foreign "$latency_foreign" \
+			--argjson now "$now" \
+			'{
+				id:$id,
+				status:$status,
+				latency_ms:$latency,
+				latency_domestic_ms:$latency_domestic,
+				latency_foreign_ms:$latency_foreign,
+				last_test:$now
+			}' >> "$health_updates"
 		[ "$new_status" = "$old_status" ] || changed=true
 		health_tested=$((health_tested + 1))
 	done
@@ -588,6 +686,8 @@ health_check() {
 			if $by_id[.id] then
 				.status=$by_id[.id].status |
 				.latency_ms=$by_id[.id].latency_ms |
+				.latency_domestic_ms=$by_id[.id].latency_domestic_ms |
+				.latency_foreign_ms=$by_id[.id].latency_foreign_ms |
 				.last_test=$by_id[.id].last_test
 			else . end
 		)
@@ -785,15 +885,23 @@ generate_config() {
 		($template[0]) as $base |
 		($nodes[0] // []) as $nodes |
 		$base |
-		.outbounds = (($nodes | map(.outbound + {tag:("node-" + .id)})) + [{type:"direct",tag:"direct"}]) |
+		# A node hostname must be resolved before that node can carry traffic.
+		# Pin bootstrap resolution to the direct DNS server so per-device DNS
+		# routing cannot recursively send the lookup through the same node.
+		.outbounds = (
+			($nodes | map(
+				.outbound + {
+					tag:("node-" + .id),
+					domain_resolver:"dns-direct"
+				}
+			)) +
+			[{type:"direct",tag:"direct"}]
+		) |
 		.dns.servers = (
 			[
 				{
-					type:"https",
-					tag:"dns-direct",
-					server:"1.1.1.1",
-					path:"/dns-query",
-					tls:{enabled:true,server_name:"cloudflare-dns.com"}
+					type:"local",
+					tag:"dns-direct"
 				}
 			] +
 			($nodes | map({
@@ -1452,6 +1560,8 @@ subscription_update() {
 				$fresh + {
 					status:($previous.status // "unknown"),
 					latency_ms:($previous.latency_ms // null),
+					latency_domestic_ms:($previous.latency_domestic_ms // null),
+					latency_foreign_ms:($previous.latency_foreign_ms // null),
 					last_test:($previous.last_test // 0)
 				}
 			)
@@ -1509,7 +1619,7 @@ policy_settings() {
 	default_policy="$(uci -q get proxyos.main.default_policy || printf 'direct')"
 	default_node_id="$(uci -q get proxyos.main.default_node_id || true)"
 	jq -n --arg policy "$default_policy" --arg node "$default_node_id" \
-		'{default_policy:$policy,default_node_id:$node,health_interval:300,health_batch_size:8,fail_closed:true}'
+		'{default_policy:$policy,default_node_id:$node,health_interval:300,health_batch_size:4,fail_closed:true}'
 }
 
 policy_apply() {
@@ -1625,7 +1735,7 @@ system_logs() {
 }
 
 update_check() {
-	current_version="0.2.2-alpha"
+	current_version="$(proxyos_version)"
 	release_api="$(uci -q get proxyos.main.release_api || printf 'https://api.github.com/repos/t2459666333-cloud/proxyos-alpha/releases/latest')"
 	release_file="/tmp/proxyos-release.$$.json"
 	release_error="/tmp/proxyos-release.$$.error"

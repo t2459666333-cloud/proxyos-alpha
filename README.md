@@ -1,4 +1,4 @@
-# ProxyOS Alpha 0.2.2
+# ProxyOS 0.3.0 RC1
 
 ProxyOS is an x86-64 OpenWrt derivative focused on one job: assigning an
 independent sing-box outbound to every LAN or Wi-Fi client.
@@ -6,7 +6,7 @@ independent sing-box outbound to every LAN or Wi-Fi client.
 This repository contains a reproducible OpenWrt ImageBuilder project. It does
 not contain a renamed stock image or a placeholder firmware file.
 
-## Alpha 0.2.2 scope
+## 0.3.0 RC1 scope
 
 - OpenWrt 25.12.5 x86-64, UEFI and legacy BIOS images
 - A custom responsive Web console
@@ -20,23 +20,35 @@ not contain a renamed stock image or a placeholder firmware file.
 - TUN plus `auto_route` and `auto_redirect`
 - Auto-detected sing-box JSON, Clash YAML/JSON, Base64, and share-link subscriptions
 - Node editing, health tests, per-node egress-IP checks, and five-minute health refresh
+- Every node test measures the real proxy path to Baidu and Google in parallel,
+  and stores the domestic and international latency independently
 - Wi-Fi/AP capability detection, radio toggle, radio settings, client disconnect,
   and an isolated guest network
 - Physical port inventory and WAN/LAN assignment with a 90-second rollback
 - Safe configuration validation before sing-box restart
 - Reference-matched overview, device, node, and Wi-Fi management screens
 - Real proxy-path latency and egress-IP checks with multi-endpoint fallback
+- Direct bootstrap DNS for proxy server hostnames, preventing recursive
+  node-resolution failures after a device is assigned to a node
+- Portable first boot with empty user data, stable PCI-path port ordering,
+  wireless-interface exclusion, and a safe single-port LAN mode
+- LAN clients receive ProxyOS itself as DNS so per-device DNS policy and leak
+  protection remain effective
+- Supported radios are detected on first boot but remain disabled until the
+  user explicitly enables Wi-Fi
 - Structured runtime errors for all parameterized Web actions
+- A 24-hour Web session, automatic in-memory session renewal, reduced background
+  polling, and automatic refresh when the browser tab becomes active again
 - Configuration backup/restore, password changes, logs, and controlled reboot
 
-## Deliberate Alpha limitations
+## Release-candidate limitations
 
 - Clash subscriptions import proxy nodes, not Clash routing rules, proxy groups,
   or rule providers. ProxyOS owns routing so that per-device policies remain deterministic.
 - Per-device encrypted DNS paths are generated, but still require hardware
   leak testing. LAN IPv6 is disabled as a conservative default.
-- The first x86 image must be validated in a VM before it is written to a
-  physical router.
+- Each new hardware model must still be validated before it is used as the
+  only production gateway.
 - Wireless support depends on the installed chipset and driver. Detection is
   accurate; universal AP-mode support cannot be guaranteed on x86.
 - Protocol-specific forms cover common fields; uncommon sing-box fields remain
@@ -75,5 +87,5 @@ device data; it does not alter the host network.
   are LAN
 - With only one Ethernet port: it remains LAN to avoid locking out management
 
-Set the root password immediately after first login. Do not expose an Alpha
-build to an untrusted network.
+Set the root password immediately after first login. Do not expose an
+unconfigured release candidate to an untrusted network.

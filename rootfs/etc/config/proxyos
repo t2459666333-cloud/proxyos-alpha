@@ -5,4 +5,4 @@ config global 'main'
 	option default_node_id ''
 	option fail_closed '1'
 	option ipv6 '0'
-
+	option health_batch_size '4'

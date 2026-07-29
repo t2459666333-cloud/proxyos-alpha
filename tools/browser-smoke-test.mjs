@@ -62,6 +62,22 @@ await check("login", async () => {
   return await page.locator("#sidebar-version").innerText();
 });
 
+if (new URL(router).hostname === "127.0.0.1") {
+  await check("expired-session-auto-recovery", async () => {
+    const expired = await page.evaluate(async () => {
+      const response = await fetch("/__expire_session", { method: "POST" });
+      return response.status;
+    });
+    if (expired !== 200) throw new Error(`session expiry fixture returned ${expired}`);
+    await page.locator(".refresh-button").first().click();
+    await page.waitForFunction(() => document.querySelector("#toast")?.textContent.includes("状态已更新"), null, { timeout: 10_000 });
+    if (!(await page.locator("#login-screen").evaluate((element) => element.classList.contains("is-hidden")))) {
+      throw new Error("UI returned to the login screen instead of reauthenticating");
+    }
+    return "session renewed without reloading the URL";
+  });
+}
+
 for (const pageName of [
   "dashboard",
   "devices",
@@ -110,8 +126,23 @@ await check("device-drawer-and-connection-tab", async () => {
   await page.locator("#device-drawer .close-layer").first().click();
   const egressCell = page.locator("#page-devices .egress-ip").first();
   await egressCell.waitFor({ state: "visible", timeout: 5_000 });
+  const localIpStyle = await page.locator("#device-table-body tr").first().locator("td").nth(3).evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight, color: style.color };
+  });
+  const egressIpStyle = await egressCell.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight, color: style.color };
+  });
+  if (JSON.stringify(localIpStyle) !== JSON.stringify(egressIpStyle)) {
+    throw new Error(`exit IP style differs from local IP: ${JSON.stringify({ localIpStyle, egressIpStyle })}`);
+  }
+  const latencyLines = await page.locator("#device-table-body tr").first().locator(".latency-line").allInnerTexts();
+  if (!latencyLines.some((line) => line.includes("国内")) || !latencyLines.some((line) => line.includes("国外"))) {
+    throw new Error(`dual latency values missing: ${latencyLines.join(" / ")}`);
+  }
   await page.screenshot({ path: resolve("work/ui-devices.png"), fullPage: true });
-  return `${ip}, ${mac}`;
+  return `${ip}, ${mac}; ${latencyLines.join(" / ")}`;
 });
 
 await check("node-modal", async () => {

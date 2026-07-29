@@ -4,10 +4,12 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "../rootfs/www");
 const port = Number(process.env.PORT || 4173);
+let sessionSequence = 0;
+let currentSession = "";
 
 const mock = {
   status: {
-    version: "0.2.2-alpha",
+    version: "0.3.0-rc1",
     hostname: "ProxyOS",
     model: "Intel N100 · x86-64",
     kernel: "6.12.74",
@@ -31,12 +33,12 @@ const mock = {
     { name: "iPad Air", mac: "AA:BB:CC:10:20:05", ip: "192.168.10.105", online: false, policy: "block", node_id: "", connection: "Wi‑Fi 5 GHz" },
   ],
   nodes: [
-    { id: "hk01", name: "香港 01", protocol: "vless", source_type: "subscription", source_id: "sub01", server: "hk.example.com", server_port: 443, enabled: true },
-    { id: "us02", name: "美国住宅 02", protocol: "trojan", source_type: "subscription", source_id: "sub02", server: "us.example.com", server_port: 443, enabled: true },
-    { id: "jp01", name: "日本手动线路", protocol: "socks", source_type: "manual", source_id: "", server: "jp.example.com", server_port: 1080, enabled: true },
-    { id: "sg01", name: "新加坡 01", protocol: "hysteria2", source_type: "subscription", source_id: "sub01", server: "sg.example.com", server_port: 8443, enabled: true },
-    { id: "de01", name: "德国 01", protocol: "vmess", source_type: "subscription", source_id: "sub02", server: "de.example.com", server_port: 443, enabled: true },
-    { id: "uk01", name: "英国 01", protocol: "shadowsocks", source_type: "manual", source_id: "", server: "uk.example.com", server_port: 8388, enabled: true },
+    { id: "hk01", name: "香港 01", protocol: "vless", source_type: "subscription", source_id: "sub01", server: "hk.example.com", server_port: 443, enabled: true, status: "available", latency_ms: 58, latency_domestic_ms: 32, latency_foreign_ms: 58 },
+    { id: "us02", name: "美国住宅 02", protocol: "trojan", source_type: "subscription", source_id: "sub02", server: "us.example.com", server_port: 443, enabled: true, status: "available", latency_ms: 168, latency_domestic_ms: 128, latency_foreign_ms: 168 },
+    { id: "jp01", name: "日本手动线路", protocol: "socks", source_type: "manual", source_id: "", server: "jp.example.com", server_port: 1080, enabled: true, status: "available", latency_ms: 91, latency_domestic_ms: 72, latency_foreign_ms: 91 },
+    { id: "sg01", name: "新加坡 01", protocol: "hysteria2", source_type: "subscription", source_id: "sub01", server: "sg.example.com", server_port: 8443, enabled: true, status: "available", latency_ms: 82, latency_domestic_ms: 45, latency_foreign_ms: 82 },
+    { id: "de01", name: "德国 01", protocol: "vmess", source_type: "subscription", source_id: "sub02", server: "de.example.com", server_port: 443, enabled: true, status: "available", latency_ms: 235, latency_domestic_ms: 198, latency_foreign_ms: 235 },
+    { id: "uk01", name: "英国 01", protocol: "shadowsocks", source_type: "manual", source_id: "", server: "uk.example.com", server_port: 8388, enabled: true, status: "available", latency_ms: 224, latency_domestic_ms: 187, latency_foreign_ms: 224 },
   ],
   wifi_status: { available: true, enabled: true, phy: "phy0", driver: "mt7921e", reason: "" },
   wifi_config: {
@@ -48,7 +50,7 @@ const mock = {
       { radio: "radio1", band: "5g", ssid: "ProxyOS-5G", encryption: "sae-mixed", channel: "36", htmode: "HE80", country: "CN", enabled: true },
     ],
   },
-  policy_settings: { default_policy: "direct", default_node_id: "", health_interval: 300, health_batch_size: 8, fail_closed: true },
+  policy_settings: { default_policy: "direct", default_node_id: "", health_interval: 300, health_batch_size: 4, fail_closed: true },
   ports: [
     { name: "eth0", mac: "00:11:22:33:44:01", state: "up", speed_mbps: 2500, driver: "igc", role: "wan" },
     { name: "eth1", mac: "00:11:22:33:44:02", state: "up", speed_mbps: 2500, driver: "igc", role: "lan" },
@@ -69,12 +71,18 @@ async function handleRpc(request, response) {
   let body = "";
   for await (const chunk of request) body += chunk;
   const envelope = JSON.parse(body || "{}");
-  const [, object, method, params = {}] = envelope.params || [];
+  const [session, object, method, params = {}] = envelope.params || [];
   let data = {};
 
   if (object === "session" && method === "login") {
-    data = { ubus_rpc_session: "preview-session" };
+    currentSession = `preview-session-${++sessionSequence}`;
+    data = { ubus_rpc_session: currentSession };
   } else if (object === "proxyos") {
+    if (!session || session !== currentSession) {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(rpcResult(envelope.id, {}, 6));
+      return;
+    }
     if (method in mock) data = mock[method];
     else if (method === "node_add") {
       const outbound = JSON.parse(params.outbound_json);
@@ -160,10 +168,12 @@ async function handleRpc(request, response) {
       data = { ok: true };
     } else if (method === "system_logs") {
       data = { items: ["proxyos: configuration loaded", "proxyos: sing-box is running"] };
+    } else if (method === "node_test") {
+      data = { ok: true, status: "available", latency_ms: 76, latency_domestic_ms: 38, latency_foreign_ms: 76 };
     } else if (method === "egress_check") {
       data = { ok: true, ip: "203.0.113.10", mode: "node", blocked: false };
     } else if (method === "update_check") {
-      data = { ok: true, current_version: "0.2.2-alpha", latest_version: "0.2.2-alpha", available: false };
+      data = { ok: true, current_version: "0.3.0-rc1", latest_version: "0.3.0-rc1", available: false };
     } else if (method === "backup_create") {
       data = { ok: true, filename: "ProxyOS-backup-preview.tar.gz", data_base64: "H4sIAAAAAAACAAMAAAAAAAAAAA==" };
     } else {
@@ -177,6 +187,12 @@ async function handleRpc(request, response) {
 
 createServer(async (request, response) => {
   try {
+    if (request.url === "/__expire_session" && request.method === "POST") {
+      currentSession = `expired-${Date.now()}`;
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end('{"ok":true}');
+      return;
+    }
     if (request.url === "/ubus" && request.method === "POST") {
       await handleRpc(request, response);
       return;

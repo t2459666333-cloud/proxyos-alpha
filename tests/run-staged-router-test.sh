@@ -2,10 +2,11 @@
 set -eu
 
 CONTROLLER="${1:-/usr/libexec/proxyos/proxyosctl}"
+CONFIG_TEMPLATE="${2:-/etc/proxyos/config-template.json}"
 TEST_STATE="$(mktemp -d /tmp/proxyos-staged-test.XXXXXX)"
 trap 'rm -rf "$TEST_STATE"' EXIT
 
-cp /etc/proxyos/config-template.json "$TEST_STATE/config-template.json"
+cp "$CONFIG_TEMPLATE" "$TEST_STATE/config-template.json"
 printf '[]\n' > "$TEST_STATE/subscriptions.json"
 
 cat > "$TEST_STATE/nodes.json" <<'EOF'
@@ -94,7 +95,9 @@ jq -e '
   any(.route.rules[]; .source_ip_cidr == ["192.168.10.202/32"] and .outbound == "node-backup-good") and
   any(.route.rules[]; .source_ip_cidr == ["192.168.10.203/32"] and .action == "reject") and
   any(.route.rules[]; .source_ip_cidr == ["192.168.10.204/32"] and .outbound == "direct") and
-  any(.dns.rules[]; .source_ip_cidr == ["192.168.10.201/32"] and .server == "dns-node-backup-good")
+  any(.dns.rules[]; .source_ip_cidr == ["192.168.10.201/32"] and .server == "dns-node-backup-good") and
+  any(.outbounds[]; .tag == "node-backup-good" and .domain_resolver == "dns-direct") and
+  any(.dns.servers[]; .tag == "dns-direct" and .type == "local")
 ' "$TEST_STATE/sing-box.json" >/dev/null
 
 echo "Staged ProxyOS controller test passed."

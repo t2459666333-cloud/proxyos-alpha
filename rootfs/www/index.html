@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>ProxyOS</title>
-    <link rel="icon" type="image/svg+xml" href="/assets/proxyos-mark.svg?v=0.2.2" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.2.2" />
+    <link rel="icon" type="image/svg+xml" href="/assets/proxyos-mark.svg?v=0.3.0rc1" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.3.0rc1" />
   </head>
   <body>
     <div id="toast" class="toast" aria-live="polite"></div>
@@ -73,7 +73,7 @@
             </div>
             <div class="table-wrap">
               <table class="data-table dashboard-table">
-                <thead><tr><th>设备名称</th><th>本地 IP</th><th>连接类型</th><th>分配节点</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
+                <thead><tr><th>设备名称</th><th>本地 IP</th><th>连接类型</th><th>分配节点</th><th>国内 / 国外延迟</th><th>状态</th><th>操作</th></tr></thead>
                 <tbody id="dashboard-device-body"></tbody>
               </table>
             </div>
@@ -98,7 +98,7 @@
             </div>
             <div class="table-wrap">
               <table class="data-table device-table">
-                <thead><tr><th class="check-col"><input type="checkbox" disabled /></th><th>设备信息</th><th>连接类型</th><th>本地 IP</th><th>分配节点</th><th>出口 IP</th><th>协议</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
+                <thead><tr><th class="check-col"><input type="checkbox" disabled /></th><th>设备信息</th><th>连接类型</th><th>本地 IP</th><th>分配节点</th><th>出口 IP</th><th>协议</th><th>国内 / 国外延迟</th><th>状态</th><th>操作</th></tr></thead>
                 <tbody id="device-table-body"></tbody>
               </table>
             </div>
@@ -128,7 +128,7 @@
             </div>
             <div class="table-wrap">
               <table class="data-table node-table">
-                <thead><tr><th>节点名称</th><th>来源</th><th>国家 / 地区</th><th>协议</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
+                <thead><tr><th>节点名称</th><th>来源</th><th>国家 / 地区</th><th>协议</th><th>国内 / 国外延迟</th><th>状态</th><th>操作</th></tr></thead>
                 <tbody id="node-table-body"></tbody>
               </table>
             </div>
@@ -297,6 +297,6 @@
       </section>
     </div>
 
-    <script src="/assets/app.js?v=0.2.2" type="module"></script>
+    <script src="/assets/app.js?v=0.3.0rc1" type="module"></script>
   </body>
 </html>

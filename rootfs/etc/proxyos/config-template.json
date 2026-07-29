@@ -33,14 +33,8 @@
   "dns": {
     "servers": [
       {
-        "type": "https",
-        "tag": "dns-direct",
-        "server": "1.1.1.1",
-        "path": "/dns-query",
-        "tls": {
-          "enabled": true,
-          "server_name": "cloudflare-dns.com"
-        }
+        "type": "local",
+        "tag": "dns-direct"
       }
     ],
     "rules": [],

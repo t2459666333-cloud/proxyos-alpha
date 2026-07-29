@@ -8,6 +8,8 @@ PROFILE="generic"
 ROOTFS_PARTSIZE="${ROOTFS_PARTSIZE:-1024}"
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROXYOS_VERSION="$(tr -d '\r\n[:space:]' < "${PROJECT_DIR}/VERSION")"
+RELEASE_LABEL="Final-${PROXYOS_VERSION}"
 WORK_DIR="${PROJECT_DIR}/.build"
 DIST_DIR="${PROJECT_DIR}/dist"
 BASE_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}"
@@ -115,8 +117,8 @@ if [[ -z "${EFI_SOURCE}" || -z "${BIOS_SOURCE}" ]]; then
   exit 1
 fi
 
-cp "${EFI_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-Alpha0.2.2-x86_64-UEFI.img.gz"
-cp "${BIOS_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-Alpha0.2.2-x86_64-BIOS.img.gz"
+cp "${EFI_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-${RELEASE_LABEL}-x86_64-UEFI.img.gz"
+cp "${BIOS_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-${RELEASE_LABEL}-x86_64-BIOS.img.gz"
 (
   cd "${DIST_DIR}"
   sha256sum ./*.img.gz > SHA256SUMS
