@@ -16,7 +16,7 @@ PORT_ROLLBACK_CONFIG="/tmp/proxyos-network.rollback"
 VERSION_FILE="${STATE_DIR}/version"
 
 proxyos_version() {
-	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc4'
+	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc5'
 }
 
 json_error() {
@@ -489,9 +489,12 @@ fetch_public_ip() {
 probe_proxy_latency() {
 	proxy_url="$1"
 	endpoint="$2"
-	max_time="${3:-10}"
+	max_time="${3:-5}"
+	# Match Mihomo/Clash URLTest semantics: make a single HEAD request,
+	# do not follow redirects, and measure through receipt of response headers.
+	# This avoids counting page bodies or redirect chains as proxy latency.
 	probe_time="$(
-		curl -4 --fail --silent --show-error --location \
+		curl -4 --silent --show-error --head \
 			--output /dev/null \
 			--proxy "$proxy_url" \
 			--connect-timeout 4 --max-time "$max_time" \
@@ -618,9 +621,9 @@ probe_node_egress() {
 	proxy_url="socks5h://127.0.0.1:${test_port}"
 	latency_domestic_file="/tmp/proxyos-latency-domestic.$$.txt"
 	latency_foreign_file="/tmp/proxyos-latency-foreign.$$.txt"
-	probe_proxy_latency "$proxy_url" "https://www.baidu.com/favicon.ico" > "$latency_domestic_file" &
+	probe_proxy_latency "$proxy_url" "https://www.baidu.com/" 5 > "$latency_domestic_file" &
 	latency_domestic_pid="$!"
-	probe_proxy_latency "$proxy_url" "https://www.gstatic.com/generate_204" > "$latency_foreign_file" &
+	probe_proxy_latency "$proxy_url" "https://www.gstatic.com/generate_204" 5 > "$latency_foreign_file" &
 	latency_foreign_pid="$!"
 	wait "$latency_domestic_pid" 2>/dev/null || true
 	wait "$latency_foreign_pid" 2>/dev/null || true

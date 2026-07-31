@@ -154,7 +154,7 @@ if (!appScript.includes(version)) {
   throw new Error("ProxyOS UI fallback version does not match VERSION");
 }
 for (const requiredProbe of [
-  "https://www.baidu.com/favicon.ico",
+  "https://www.baidu.com/",
   "https://www.gstatic.com/generate_204",
   "https://speed.cloudflare.com/__down?bytes=4000000",
 ]) {

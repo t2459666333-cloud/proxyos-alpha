@@ -705,13 +705,13 @@ function renderPolicies() {
 
 function renderSystem() {
   const healthy = Boolean(state.status.singbox_running);
-  $("#system-version").textContent = state.status.version || "0.3.0-rc4";
+  $("#system-version").textContent = state.status.version || "0.3.0-rc5";
   $("#system-model").textContent = state.status.model || "x86-64";
   $("#system-kernel").textContent = state.status.kernel || "—";
   $("#system-core").textContent = healthy ? "运行正常" : "未运行";
   $("#sidebar-core-text").textContent = healthy ? "系统运行正常" : "代理核心异常";
   $("#sidebar-uptime").textContent = formatUptime(state.status.uptime);
-  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc4";
+  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc5";
   $("#sidebar-kernel").textContent = state.status.kernel || "—";
   ["#global-health", "#system-health-pill"].forEach((selector) => {
     const pill = $(selector);
