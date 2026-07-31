@@ -38,6 +38,7 @@ const state = {
   rollbackTimer: null,
   refreshTimer: null,
   loading: false,
+  nodeTestInProgress: false,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -705,13 +706,13 @@ function renderPolicies() {
 
 function renderSystem() {
   const healthy = Boolean(state.status.singbox_running);
-  $("#system-version").textContent = state.status.version || "0.3.0-rc5";
+  $("#system-version").textContent = state.status.version || "0.3.0-rc6";
   $("#system-model").textContent = state.status.model || "x86-64";
   $("#system-kernel").textContent = state.status.kernel || "—";
   $("#system-core").textContent = healthy ? "运行正常" : "未运行";
   $("#sidebar-core-text").textContent = healthy ? "系统运行正常" : "代理核心异常";
   $("#sidebar-uptime").textContent = formatUptime(state.status.uptime);
-  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc5";
+  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc6";
   $("#sidebar-kernel").textContent = state.status.kernel || "—";
   ["#global-health", "#system-health-pill"].forEach((selector) => {
     const pill = $(selector);
@@ -936,7 +937,12 @@ function syncNodeProtocolFields() {
   $("#raw-json-field").classList.toggle("is-hidden", !raw);
 }
 async function testNode(button) {
-  button.disabled = true;
+  if (state.nodeTestInProgress) {
+    showToast("已有节点正在测速，请等待当前测速完成", true);
+    return;
+  }
+  state.nodeTestInProgress = true;
+  $$(".test-node").forEach((item) => { item.disabled = true; });
   const old = button.textContent;
   button.textContent = "测试中";
   try {
@@ -949,7 +955,11 @@ async function testNode(button) {
     showToast(`国内 ${domestic} · 国外 ${foreign} · 下载 ${speed} · 丢包 ${loss} · 稳定性 ${stability}`);
     await loadAll({ quiet: true });
   } catch (error) { showToast(error.message, true); }
-  finally { button.disabled = false; button.textContent = old; }
+  finally {
+    state.nodeTestInProgress = false;
+    $$(".test-node").forEach((item) => { item.disabled = false; });
+    if (document.contains(button)) button.textContent = old;
+  }
 }
 function assignNode(id) {
   const node = state.nodes.find((item) => item.id === id);

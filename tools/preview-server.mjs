@@ -9,7 +9,7 @@ let currentSession = "";
 
 const mock = {
   status: {
-    version: "0.3.0-rc5",
+    version: "0.3.0-rc6",
     hostname: "ProxyOS",
     model: "Intel N100 · x86-64",
     kernel: "6.12.74",
@@ -192,7 +192,7 @@ async function handleRpc(request, response) {
     } else if (method === "egress_check") {
       data = { ok: true, ip: "203.0.113.10", mode: "node", blocked: false };
     } else if (method === "update_check") {
-      data = { ok: true, current_version: "0.3.0-rc5", latest_version: "0.3.0-rc5", available: false };
+      data = { ok: true, current_version: "0.3.0-rc6", latest_version: "0.3.0-rc6", available: false };
     } else if (method === "backup_create") {
       data = { ok: true, filename: "ProxyOS-backup-preview.tar.gz", data_base64: "H4sIAAAAAAACAAMAAAAAAAAAAA==" };
     } else {

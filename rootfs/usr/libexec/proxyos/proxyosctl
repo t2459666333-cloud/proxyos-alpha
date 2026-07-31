@@ -16,7 +16,7 @@ PORT_ROLLBACK_CONFIG="/tmp/proxyos-network.rollback"
 VERSION_FILE="${STATE_DIR}/version"
 
 proxyos_version() {
-	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc5'
+	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc6'
 }
 
 json_error() {
@@ -581,9 +581,89 @@ probe_proxy_quality() {
 	printf '%s|%s\n' "$packet_loss" "$stability"
 }
 
+terminate_node_probe_process() {
+	probe_pid="${1:-}"
+	case "$probe_pid" in
+		""|*[!0-9]*) return 0 ;;
+	esac
+	[ "$probe_pid" -ne "$$" ] || return 0
+	[ -d "/proc/${probe_pid}" ] || return 0
+	for child_pid in $(cat "/proc/${probe_pid}/task/${probe_pid}/children" 2>/dev/null || true); do
+		terminate_node_probe_process "$child_pid"
+	done
+	kill "$probe_pid" >/dev/null 2>&1 || true
+	[ ! -d "/proc/${probe_pid}" ] || kill -9 "$probe_pid" >/dev/null 2>&1 || true
+}
+
+cleanup_node_probe() {
+	for probe_pid in \
+		${latency_domestic_pid:-} \
+		${latency_foreign_pid:-} \
+		${test_pid:-}; do
+		terminate_node_probe_process "$probe_pid"
+	done
+	for probe_pid in \
+		${latency_domestic_pid:-} \
+		${latency_foreign_pid:-} \
+		${test_pid:-}; do
+		wait "$probe_pid" 2>/dev/null || true
+	done
+	for probe_file in \
+		${test_config:-} \
+		${test_log:-} \
+		${latency_domestic_file:-} \
+		${latency_foreign_file:-}; do
+		rm -f "$probe_file"
+	done
+	test_pid=""
+	latency_domestic_pid=""
+	latency_foreign_pid=""
+	test_config=""
+	test_log=""
+	latency_domestic_file=""
+	latency_foreign_file=""
+}
+
+cleanup_stale_node_probes() {
+	for stale_config in /tmp/proxyos-node-test.*.json; do
+		[ -e "$stale_config" ] || continue
+		stale_owner="${stale_config#/tmp/proxyos-node-test.}"
+		stale_owner="${stale_owner%.json}"
+		case "$stale_owner" in
+			""|*[!0-9]*) continue ;;
+		esac
+		if kill -0 "$stale_owner" >/dev/null 2>&1; then
+			stale_owner_cmdline="$(tr '\0' ' ' < "/proc/${stale_owner}/cmdline" 2>/dev/null || true)"
+			case "$stale_owner_cmdline" in
+				*"proxyosctl node-test"*|*"proxyosctl health-check"*) continue ;;
+			esac
+		fi
+		for proc_path in /proc/[0-9]*; do
+			[ -r "${proc_path}/cmdline" ] || continue
+			proc_cmdline="$(tr '\0' ' ' < "${proc_path}/cmdline" 2>/dev/null || true)"
+			case "$proc_cmdline" in
+				*"/usr/bin/sing-box run -c ${stale_config}"*)
+					terminate_node_probe_process "${proc_path##*/}"
+					;;
+			esac
+		done
+		rm -f "$stale_config" \
+			"/tmp/proxyos-node-test.${stale_owner}.log" \
+			"/tmp/proxyos-latency-domestic.${stale_owner}.txt" \
+			"/tmp/proxyos-latency-foreign.${stale_owner}.txt"
+	done
+}
+
+controller_cleanup() {
+	cleanup_node_probe
+	[ "${mutation_lock_owned:-false}" != true ] || rm -rf "$mutation_lock"
+}
+
 probe_node_egress() {
 	node_id="$1"
 	probe_mode="${2:-quick}"
+	cleanup_stale_node_probes
+	cleanup_node_probe
 	outbound="$(jq -c --arg id "$node_id" '.[] | select(.id == $id) | .outbound' "$NODES_FILE")"
 	[ -n "$outbound" ] || {
 		printf 'error|null|null|null|null|null|null\n'
@@ -639,9 +719,7 @@ probe_node_egress() {
 		stability_score="$(printf '%s' "$quality_result" | cut -d '|' -f 2)"
 		download_mbps="$(probe_proxy_download_speed "$proxy_url")"
 	fi
-	kill "$test_pid" >/dev/null 2>&1 || true
-	wait "$test_pid" 2>/dev/null || true
-	rm -f "$test_config" "$test_log" "$latency_domestic_file" "$latency_foreign_file"
+	cleanup_node_probe
 	if [ "$latency_foreign" != "null" ]; then
 		latency="$latency_foreign"
 	elif [ "$latency_domestic" != "null" ]; then
@@ -1976,19 +2054,23 @@ system_reboot() {
 
 acquire_mutation_lock() {
 	mutation_lock="/tmp/proxyos-mutation.lock"
+	mutation_lock_owned=false
 	mutation_wait=0
+	mutation_max_wait=20
+	[ "${command_name:-}" != "node-test" ] || mutation_max_wait=0
 	while ! mkdir "$mutation_lock" 2>/dev/null; do
 		lock_pid="$(cat "${mutation_lock}/pid" 2>/dev/null || true)"
 		if [ -z "$lock_pid" ] || ! kill -0 "$lock_pid" >/dev/null 2>&1; then
 			rm -rf "$mutation_lock"
 			continue
 		fi
-		[ "$mutation_wait" -lt 20 ] || json_error "另一项 ProxyOS 设置仍在应用，请稍后重试"
+		[ "$mutation_wait" -lt "$mutation_max_wait" ] ||
+			json_error "另一项 ProxyOS 设置仍在应用，请稍后重试"
 		sleep 1
 		mutation_wait=$((mutation_wait + 1))
 	done
 	printf '%s\n' "$$" > "${mutation_lock}/pid"
-	trap 'rm -rf /tmp/proxyos-mutation.lock' EXIT HUP INT TERM
+	mutation_lock_owned=true
 }
 
 assert_state_writable() {
@@ -2003,6 +2085,9 @@ assert_state_writable() {
 command_name="${1:-}"
 input="${2-}"
 [ -n "$input" ] || input='{}'
+
+trap 'controller_cleanup' EXIT
+trap 'exit 143' HUP INT TERM
 
 require_commands
 ensure_state

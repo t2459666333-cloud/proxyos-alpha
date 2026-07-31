@@ -1,7 +1,7 @@
 {
   "name": "proxyos-alpha",
   "private": true,
-  "version": "0.3.0-rc5",
+  "version": "0.3.0-rc6",
   "type": "module",
   "scripts": {
     "preview": "node tools/preview-server.mjs",
