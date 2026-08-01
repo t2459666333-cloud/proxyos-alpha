@@ -41,6 +41,7 @@ require_commands() {
 
 platform_preflight() {
 	feature="$1"
+	[ "${PROXYOS_SKIP_PREFLIGHT:-0}" = "1" ] && return 0
 	[ ! -x /usr/sbin/proxyos-platform-doctor ] || \
 		/usr/sbin/proxyos-platform-doctor >/dev/null 2>&1 || true
 	command -v curl >/dev/null 2>&1 || json_error "固件缺少 curl，无法执行网络请求"
