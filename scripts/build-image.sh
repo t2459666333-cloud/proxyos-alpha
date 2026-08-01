@@ -6,6 +6,8 @@ TARGET="x86"
 SUBTARGET="64"
 PROFILE="generic"
 ROOTFS_PARTSIZE="${ROOTFS_PARTSIZE:-1024}"
+TAILSCALE_VERSION="${TAILSCALE_VERSION:-1.98.10}"
+TAILSCALE_SHA256="52490ce0832b245857e2afef7426d6ae5a4b49fb391412833cc95729bd23f7de"
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROXYOS_VERSION="$(tr -d '\r\n[:space:]' < "${PROJECT_DIR}/VERSION")"
@@ -15,6 +17,8 @@ DIST_DIR="${PROJECT_DIR}/dist"
 BASE_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}"
 ARCHIVE="openwrt-imagebuilder-${OPENWRT_VERSION}-x86-64.Linux-x86_64.tar.zst"
 IMAGEBUILDER_DIR="${WORK_DIR}/openwrt-imagebuilder-${OPENWRT_VERSION}-x86-64.Linux-x86_64"
+TAILSCALE_ARCHIVE="tailscale_${TAILSCALE_VERSION}_amd64.tgz"
+STAGED_ROOTFS="${WORK_DIR}/proxyos-rootfs"
 
 for command_name in curl sha256sum tar make gzip; do
   command -v "${command_name}" >/dev/null 2>&1 || {
@@ -30,6 +34,8 @@ chmod 0755 \
   "${PROJECT_DIR}/rootfs/etc/init.d/proxyos-lan-watch" \
   "${PROJECT_DIR}/rootfs/etc/init.d/proxyos-platform-doctor" \
   "${PROJECT_DIR}/rootfs/etc/init.d/proxyos-port-detect" \
+  "${PROJECT_DIR}/rootfs/etc/init.d/tailscaled" \
+  "${PROJECT_DIR}/rootfs/etc/hotplug.d/iface/95-proxyos-remote-access" \
   "${PROJECT_DIR}/rootfs/etc/uci-defaults/99-proxyos" \
   "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" \
   "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/subscription_parser.py" \
@@ -39,14 +45,28 @@ chmod 0755 \
   "${PROJECT_DIR}/rootfs/usr/sbin/proxyos-selftest" \
   "${PROJECT_DIR}/rootfs/usr/sbin/proxyos-watch-lan"
 
+if [[ ! -f "${WORK_DIR}/${TAILSCALE_ARCHIVE}" ]]; then
+  echo "[1/6] Downloading Tailscale ${TAILSCALE_VERSION} static binaries"
+  curl --fail --location --retry 3 \
+    "https://pkgs.tailscale.com/stable/${TAILSCALE_ARCHIVE}" \
+    --output "${WORK_DIR}/${TAILSCALE_ARCHIVE}"
+fi
+echo "${TAILSCALE_SHA256}  ${WORK_DIR}/${TAILSCALE_ARCHIVE}" | sha256sum --check
+rm -rf "${STAGED_ROOTFS}" "${WORK_DIR}/tailscale_${TAILSCALE_VERSION}_amd64"
+mkdir -p "${STAGED_ROOTFS}/usr/sbin"
+cp -a "${PROJECT_DIR}/rootfs/." "${STAGED_ROOTFS}/"
+tar -xzf "${WORK_DIR}/${TAILSCALE_ARCHIVE}" -C "${WORK_DIR}"
+install -m 0755 "${WORK_DIR}/tailscale_${TAILSCALE_VERSION}_amd64/tailscale" "${STAGED_ROOTFS}/usr/sbin/tailscale"
+install -m 0755 "${WORK_DIR}/tailscale_${TAILSCALE_VERSION}_amd64/tailscaled" "${STAGED_ROOTFS}/usr/sbin/tailscaled"
+
 if [[ ! -f "${WORK_DIR}/${ARCHIVE}" ]]; then
-  echo "[1/5] Downloading OpenWrt ${OPENWRT_VERSION} ImageBuilder"
+  echo "[2/6] Downloading OpenWrt ${OPENWRT_VERSION} ImageBuilder"
   curl --fail --location --retry 3 \
     "${BASE_URL}/${ARCHIVE}" \
     --output "${WORK_DIR}/${ARCHIVE}"
 fi
 
-echo "[2/5] Verifying official OpenWrt checksum"
+echo "[3/6] Verifying official OpenWrt checksum"
 curl --fail --location --retry 3 \
   "${BASE_URL}/sha256sums" \
   --output "${WORK_DIR}/sha256sums"
@@ -61,7 +81,7 @@ fi
 )
 
 if [[ ! -d "${IMAGEBUILDER_DIR}" ]]; then
-  echo "[3/5] Extracting ImageBuilder"
+  echo "[4/6] Extracting ImageBuilder"
   tar --use-compress-program=unzstd -xf "${WORK_DIR}/${ARCHIVE}" -C "${WORK_DIR}"
 fi
 
@@ -107,14 +127,14 @@ PACKAGES=(
   "kmod-ath9k"
 )
 
-echo "[4/5] Building ProxyOS images"
+echo "[5/6] Building ProxyOS images"
 make -C "${IMAGEBUILDER_DIR}" image \
   PROFILE="${PROFILE}" \
   PACKAGES="${PACKAGES[*]}" \
-  FILES="${PROJECT_DIR}/rootfs" \
+  FILES="${STAGED_ROOTFS}" \
   ROOTFS_PARTSIZE="${ROOTFS_PARTSIZE}"
 
-echo "[5/5] Collecting release artifacts"
+echo "[6/6] Collecting release artifacts"
 SOURCE_DIR="${IMAGEBUILDER_DIR}/bin/targets/${TARGET}/${SUBTARGET}"
 EFI_SOURCE="$(find "${SOURCE_DIR}" -maxdepth 1 -name '*squashfs-combined-efi.img.gz' -print -quit)"
 BIOS_SOURCE="$(find "${SOURCE_DIR}" -maxdepth 1 -name '*squashfs-combined.img.gz' ! -name '*efi*' -print -quit)"

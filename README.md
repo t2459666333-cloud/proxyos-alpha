@@ -1,4 +1,4 @@
-# ProxyOS 0.3.0 RC7
+# ProxyOS 0.3.0 RC8
 
 ProxyOS is an x86-64 OpenWrt derivative focused on one job: assigning an
 independent sing-box outbound to every LAN or Wi-Fi client.
@@ -6,7 +6,7 @@ independent sing-box outbound to every LAN or Wi-Fi client.
 This repository contains a reproducible OpenWrt ImageBuilder project. It does
 not contain a renamed stock image or a placeholder firmware file.
 
-## 0.3.0 RC7 scope
+## 0.3.0 RC8 scope
 
 - OpenWrt 25.12.5 x86-64, UEFI and legacy BIOS images
 - A custom responsive Web console
@@ -43,6 +43,16 @@ not contain a renamed stock image or a placeholder firmware file.
 - A dedicated external AP/router management view when no local AP-capable radio
   is present
 - Physical port inventory and WAN/LAN assignment with a 90-second rollback
+- Multi-WAN and multi-LAN role assignment. Two-or-more-port systems require at
+  least one WAN and one LAN; a one-port system prioritizes WAN as requested.
+- Authenticated remote egress profiles for every active WAN and directly
+  attached wired computer. Both HTTP CONNECT and SOCKS5 credentials follow the
+  selected local device policy without changing the remote client settings.
+- Optional Tailscale tunnel support for CGNAT environments. It is disabled by
+  default and, when enabled, does not accept routes, replace DNS, or advertise
+  ProxyOS as an exit node.
+- WAN hotplug refresh keeps broadband profiles and bind-interface selection in
+  sync when a new uplink is connected.
 - Portable first-boot port detection that excludes bridges, virtual adapters,
   TUN interfaces, and wireless devices before probing an upstream DHCP port
 - A boot-time platform doctor and read-only `proxyos-selftest` covering WAN,
@@ -69,7 +79,7 @@ not contain a renamed stock image or a placeholder firmware file.
 - Device block policies are enforced by an isolated nftables table and are
   restored at service startup
 - Update checks that degrade gracefully when no public release channel has
-  been configured yet
+  been configured yet and never offer an older release candidate as an update
 
 ## Release-candidate limitations
 
@@ -84,6 +94,9 @@ not contain a renamed stock image or a placeholder firmware file.
 - Protocol-specific forms cover common fields; uncommon sing-box fields remain
   available through raw outbound JSON.
 - Firmware upload/sysupgrade and signed online updates are not exposed yet.
+- Direct WAN remote access requires a reachable public IPv4/IPv6 address or an
+  upstream port mapping. Carrier-grade NAT needs a private tunnel such as the
+  optional Tailscale integration.
 
 ## Build
 
@@ -115,7 +128,9 @@ device data; it does not alter the host network.
 - Initial password: blank, matching stock OpenWrt first boot
 - With two or more physical Ethernet ports: first port is WAN, remaining ports
   are LAN
-- With only one Ethernet port: it remains LAN to avoid locking out management
+- With only one Ethernet port: it is assigned to WAN first; use a local console
+  or preconfigure an alternate management interface before relying on it as the
+  only management path
 
 Set the root password immediately after first login. Do not expose an
 unconfigured release candidate to an untrusted network.

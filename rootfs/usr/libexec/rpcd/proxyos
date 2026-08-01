@@ -16,7 +16,7 @@ case "$1" in
   "node_test": {"id":""},
   "health_check": {},
   "egress_check": {"node_id":"", "device_mac":""},
-  "device_bind": {"mac":"", "ip":"", "name":"", "policy":"", "node_id":"", "backup_node_id":"", "failure_mode":"", "auto_source":""},
+  "device_bind": {"mac":"", "ip":"", "name":"", "connection":"", "type":"", "policy":"", "node_id":"", "backup_node_id":"", "failure_mode":"", "auto_source":""},
   "devices_assign_node": {"node_id":"", "device_macs":[]},
   "wifi_status": {},
   "wifi_config": {},
@@ -34,6 +34,12 @@ case "$1" in
   "subscription_delete": {"id":""},
   "policy_settings": {},
   "policy_apply": {"default_policy":"", "default_node_id":""},
+  "remote_access": {},
+  "remote_access_apply": {"enabled":false, "wan_enabled":false, "port":10808},
+  "remote_access_rotate": {"mac":""},
+  "tunnel_status": {},
+  "tunnel_connect": {},
+  "tunnel_logout": {},
   "backup_create": {},
   "backup_restore": {"data_base64":""},
   "password_set": {"password":""},
@@ -48,7 +54,7 @@ EOF
 	call)
 		read -r input
 		case "$2" in
-			status|devices|nodes|ports|ports_confirm|subscriptions|generate|apply|health_check|policy_settings|backup_create|system_logs|update_check|system_reboot)
+			status|devices|nodes|ports|ports_confirm|subscriptions|generate|apply|health_check|policy_settings|remote_access|tunnel_status|backup_create|system_logs|update_check|system_reboot)
 				exec "$CTL" "$(printf '%s' "$2" | tr '_' '-')" '{}'
 				;;
 			wifi_status)
@@ -110,6 +116,18 @@ EOF
 				;;
 			policy_apply)
 				exec "$CTL" policy-apply "$input"
+				;;
+			remote_access_apply)
+				exec "$CTL" remote-access-apply "$input"
+				;;
+			remote_access_rotate)
+				exec "$CTL" remote-access-rotate "$input"
+				;;
+			tunnel_connect)
+				exec "$CTL" tunnel-connect "$input"
+				;;
+			tunnel_logout)
+				exec "$CTL" tunnel-logout "$input"
 				;;
 			backup_restore)
 				exec "$CTL" backup-restore "$input"

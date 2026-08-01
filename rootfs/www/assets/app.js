@@ -22,6 +22,8 @@ const state = {
   ports: [],
   subscriptions: [],
   policy: { default_policy: "direct", default_node_id: "" },
+  remote: { enabled: false, wan_enabled: false, port: 10808, wan_ip: "", items: [] },
+  tunnel: { installed: false, running: false, connected: false, state: "NotInstalled", ipv4: "", ipv6: "", dns_name: "", auth_url: "" },
   selectedDevice: null,
   selectedDevices: new Set(),
   assigningNodeId: "",
@@ -56,6 +58,7 @@ const iconPaths = {
   shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="M12 8v4M12 16h.01"/>',
   network: '<rect x="9" y="2" width="6" height="5" rx="1"/><rect x="2" y="17" width="6" height="5" rx="1"/><rect x="16" y="17" width="6" height="5" rx="1"/><path d="M12 7v5M5 17v-3h14v3"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.55V21h-4v-.08A1.7 1.7 0 0 0 8.95 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1.03H3v-4h.08A1.7 1.7 0 0 0 4.6 8.95a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15.05 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06L19.82 7l-.06.06A1.7 1.7 0 0 0 19.4 9c.63.25 1.04.85 1.04 1.52V10.6H21v4h-.56A1.7 1.7 0 0 0 19.4 15Z"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3M14 9l2 2"/>',
   checkCircle: '<circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14.8-4M4 4v5h5M4 13a8 8 0 0 0 14.8 4M20 20v-5h-5"/>',
   filter: '<path d="M4 5h16l-6 7v5l-4 2v-7Z"/>',
@@ -227,6 +230,8 @@ async function loadAll({ quiet = false, full = true } = {}) {
     ["ports", "ports"],
     ["subscriptions", "subscriptions"],
     ["policy", "policy_settings"],
+    ["remote", "remote_access"],
+    ["tunnel", "tunnel_status"],
   ];
   const requests = full ? [...coreRequests, ...fullRequests] : coreRequests;
   // rpcd launches one controller process per method. Serial reads avoid
@@ -783,15 +788,153 @@ function renderPolicies() {
   $("#policy-settings-form").addEventListener("submit", savePolicySettings);
 }
 
+function remotePolicyText(item) {
+  if (item.mac.startsWith("__WAN__:")) return `WAN 宽带直连 · ${item.interface || "wan"}`;
+  if (item.policy === "fixed_node") return item.node_name || "指定节点已失效";
+  return { direct: "LAN 电脑 · 本地直连", auto_node: "LAN 电脑 · 自动节点", block: "LAN 电脑 · 禁止联网", system_default: "LAN 电脑 · 系统默认" }[item.policy] || "LAN 电脑 · 系统默认";
+}
+
+function remoteHost() {
+  return state.remote.public_ip || state.remote.wan_ip || "公网IP或域名";
+}
+
+function remoteUrl(scheme, item) {
+  const user = encodeURIComponent(item.username || "");
+  const password = encodeURIComponent(item.password || "");
+  const host = item.mac.startsWith("__WAN__:") ? (item.public_ip || item.ip || remoteHost()) : remoteHost();
+  return `${scheme}://${user}:${password}@${host}:${state.remote.port || 10808}`;
+}
+
+function remoteIpv6Url(scheme, item) {
+  const user = encodeURIComponent(item.username || "");
+  const password = encodeURIComponent(item.password || "");
+  const host = item.mac.startsWith("__WAN__:") ? item.public_ipv6 : state.remote.public_ipv6;
+  return host ? `${scheme}://${user}:${password}@[${host}]:${state.remote.port || 10808}` : "";
+}
+
+function remoteTunnelUrl(scheme, item) {
+  const host = state.tunnel?.ipv4 || state.tunnel?.dns_name || "";
+  if (!state.tunnel?.connected || !host) return "";
+  const user = encodeURIComponent(item.username || "");
+  const password = encodeURIComponent(item.password || "");
+  return `${scheme}://${user}:${password}@${host}:${state.remote.port || 10808}`;
+}
+
+function remoteConnectionCell(scheme, item) {
+  const ipv4 = remoteUrl(scheme, item);
+  const ipv6 = remoteIpv6Url(scheme, item);
+  const tunnel = remoteTunnelUrl(scheme, item);
+  const entry = (label, value) => `<span class="remote-link-line"><small>${label}</small><code class="remote-url">${escapeHtml(value)}</code><button class="text-action remote-copy" data-copy="${escapeHtml(value)}">复制</button></span>`;
+  return (tunnel ? entry("隧道", tunnel) : "") + entry("IPv4", ipv4) + (ipv6 ? entry("IPv6", ipv6) : "");
+}
+
+function renderTunnel() {
+  const tunnel = state.tunnel || {};
+  const connected = Boolean(tunnel.connected);
+  $("#tunnel-description").textContent = !tunnel.installed ? "当前固件未安装隧道组件" : connected ? `已连接${tunnel.dns_name ? ` · ${tunnel.dns_name}` : ""}；不接管默认路由和 DNS` : tunnel.auth_url ? "授权链接已生成，请点击“打开授权页面”完成绑定" : tunnel.running ? "服务已启动，等待账户授权" : "服务未启动；启用后不会改变现有 WAN/LAN 路由";
+  $("#tunnel-address").textContent = connected ? (tunnel.ipv4 || tunnel.ipv6 || tunnel.dns_name) : "尚未连接";
+  const authLink = $("#tunnel-auth-link");
+  authLink.classList.toggle("is-hidden", !tunnel.auth_url);
+  if (tunnel.auth_url) authLink.href = tunnel.auth_url;
+  $("#tunnel-connect").classList.toggle("is-hidden", connected);
+  $("#tunnel-connect").disabled = !tunnel.installed;
+  $("#tunnel-connect").textContent = tunnel.auth_url ? "刷新授权链接" : tunnel.running ? "生成授权链接" : "启用内网穿透";
+  $("#tunnel-logout").classList.toggle("is-hidden", !connected);
+}
+
+async function connectTunnel() {
+  const button = $("#tunnel-connect");
+  button.disabled = true; button.textContent = "正在启动…";
+  try {
+    state.tunnel = await api("tunnel_connect");
+    renderTunnel(); renderRemoteAccess();
+    if (state.tunnel.auth_url) {
+      const authLink = $("#tunnel-auth-link");
+      authLink.classList.add("is-attention");
+      authLink.focus();
+      window.setTimeout(() => authLink.classList.remove("is-attention"), 2400);
+    }
+    showToast(state.tunnel.connected ? "内网穿透已连接" : state.tunnel.auth_url ? "授权链接已生成，请点击“打开授权页面”" : "暂未取得授权链接，请稍后重试", !state.tunnel.auth_url);
+  } catch (error) { showToast(error.message, true); }
+  finally { button.disabled = false; }
+}
+
+async function logoutTunnel() {
+  if (!window.confirm("退出后，异地设备将无法通过隧道连接。是否继续？")) return;
+  try { state.tunnel = await api("tunnel_logout"); renderTunnel(); renderRemoteAccess(); showToast("已退出内网穿透"); }
+  catch (error) { showToast(error.message, true); }
+}
+
+async function copyText(value) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(value);
+    else {
+      const input = document.createElement("textarea");
+      input.value = value; input.style.position = "fixed"; input.style.opacity = "0";
+      document.body.append(input); input.select(); document.execCommand("copy"); input.remove();
+    }
+    showToast("连接信息已复制");
+  } catch { showToast("复制失败，请手动选择连接信息", true); }
+}
+
+function renderRemoteAccess() {
+  const remote = state.remote || { items: [] };
+  $("#remote-enabled").checked = Boolean(remote.enabled);
+  $("#remote-wan-enabled").checked = Boolean(remote.wan_enabled);
+  $("#remote-port").value = remote.port || 10808;
+  const items = Array.isArray(remote.items) ? remote.items : [];
+  $("#remote-device-body").innerHTML = items.length ? items.map((item) => {
+    const isWan = item.mac.startsWith("__WAN__:");
+    return `<tr>
+      <td><div class="device-cell"><span class="device-avatar remote-${isWan ? "wan" : "lan"}"><span class="icon" data-icon="${isWan ? "globe" : "monitor"}"></span></span><div><strong>${escapeHtml(item.name)}</strong><small><span class="remote-role ${isWan ? "wan" : "lan"}">${isWan ? "WAN" : "LAN"}</span>${isWan ? "宽带出口" : "直连有线电脑"}</small></div></div></td>
+      <td>${isWan ? `<strong>${escapeHtml(item.interface || "wan")}</strong><small class="remote-follow-note">${escapeHtml(item.bind_interface || "等待接口")} · WAN ${escapeHtml(item.ip || "等待地址")}</small><small class="remote-follow-note">公网 ${escapeHtml(item.public_ip || "检测中/需端口映射")}</small>` : escapeHtml(item.ip || "—")}</td>
+      <td><strong>${escapeHtml(remotePolicyText(item))}</strong><small class="remote-follow-note">策略修改后自动跟随</small></td>
+      <td>${remoteConnectionCell("http", item)}</td>
+      <td>${remoteConnectionCell("socks5", item)}</td>
+      <td><span class="credential-pair"><small>用户</small><code>${escapeHtml(item.username)}</code><small>密码</small><code>${escapeHtml(item.password)}</code></span></td>
+      <td><button class="button button-soft remote-rotate" data-mac="${escapeHtml(item.mac)}">重置密码</button></td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="7"><div class="empty-state">尚未发现直接连接 LAN 口的电脑；WAN 宽带资料会在刷新后生成</div></td></tr>`;
+  $("#remote-device-count").textContent = `共 ${items.filter((item) => !item.mac.startsWith("__WAN__:")).length} 台 LAN 电脑 + ${items.filter((item) => item.mac.startsWith("__WAN__:")).length} 条 WAN 宽带`;
+  $$(".remote-copy").forEach((button) => button.addEventListener("click", () => copyText(button.dataset.copy)));
+  $$(".remote-rotate").forEach((button) => button.addEventListener("click", () => rotateRemotePassword(button.dataset.mac)));
+  hydrateIcons($("#page-remote"));
+  renderTunnel();
+}
+
+async function saveRemoteAccess(event) {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true; button.textContent = "正在应用…";
+  try {
+    state.remote = await api("remote_access_apply", {
+      enabled: $("#remote-enabled").checked,
+      wan_enabled: $("#remote-wan-enabled").checked,
+      port: Number($("#remote-port").value),
+    });
+    renderRemoteAccess();
+    showToast("远程出口配置已应用");
+  } catch (error) { showToast(error.message, true); }
+  finally { button.disabled = false; button.textContent = "保存并应用"; }
+}
+
+async function rotateRemotePassword(mac) {
+  if (!window.confirm("重置后，使用旧密码的异地设备会立即断开。是否继续？")) return;
+  try {
+    state.remote = await api("remote_access_rotate", { mac });
+    renderRemoteAccess(); showToast("远程出口密码已重置");
+  } catch (error) { showToast(error.message, true); }
+}
+
 function renderSystem() {
   const healthy = Boolean(state.status.singbox_running);
-  $("#system-version").textContent = state.status.version || "0.3.0-rc7";
+  $("#system-version").textContent = state.status.version || "0.3.0-rc8";
   $("#system-model").textContent = state.status.model || "x86-64";
   $("#system-kernel").textContent = state.status.kernel || "—";
   $("#system-core").textContent = healthy ? "运行正常" : "未运行";
   $("#sidebar-core-text").textContent = healthy ? "系统运行正常" : "代理核心异常";
   $("#sidebar-uptime").textContent = formatUptime(state.status.uptime);
-  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc7";
+  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc8";
   $("#sidebar-kernel").textContent = state.status.kernel || "—";
   ["#global-health", "#system-health-pill"].forEach((selector) => {
     const pill = $(selector);
@@ -829,6 +972,7 @@ function renderAll() {
   renderNodes();
   renderSubscriptions();
   renderWifi();
+  renderRemoteAccess();
   renderPorts();
   renderPolicies();
   renderSystem();
@@ -932,6 +1076,8 @@ async function saveDevicePolicy(event) {
       ip: device.ip,
       name: deviceName,
       custom_name: true,
+      connection: device.connection || "",
+      type: device.type || "other",
       policy,
       node_id: policy === "fixed_node" ? nodeId : "",
       backup_node_id: backupNodeId,
@@ -1414,7 +1560,10 @@ async function batchEgressCheck() {
 
 async function applyPorts() {
   const assignments = $$(".port-card").map((card) => ({ name: card.dataset.port, role: $(".port-role", card).value }));
-  if (assignments.filter((item) => item.role === "wan").length !== 1 || assignments.filter((item) => item.role === "lan").length < 1) return showToast("必须恰好保留一个 WAN，并至少保留一个 LAN", true);
+  const wanCount = assignments.filter((item) => item.role === "wan").length;
+  const lanCount = assignments.filter((item) => item.role === "lan").length;
+  if (wanCount < 1) return showToast("必须至少保留一个 WAN", true);
+  if (assignments.length > 1 && lanCount < 1) return showToast("两个及以上网口时必须至少保留一个 LAN", true);
   if (!window.confirm("应用后网络会短暂断开。90 秒内未确认将自动回滚，是否继续？")) return;
   try { await api("ports_apply", { assignments_json: JSON.stringify(assignments) }); $("#port-confirm-panel").classList.remove("is-hidden"); startRollbackCountdown(90); showToast("正在应用网口配置"); }
   catch (error) { showToast(error.message, true); }
@@ -1541,6 +1690,13 @@ function bindEvents() {
     if (id) deleteSubscription(id);
   });
   $("#apply-ports").addEventListener("click", applyPorts);
+  $("#remote-access-form").addEventListener("submit", saveRemoteAccess);
+  $("#tunnel-connect").addEventListener("click", connectTunnel);
+  $("#tunnel-logout").addEventListener("click", logoutTunnel);
+  $("#remote-refresh").addEventListener("click", async () => {
+    try { state.remote = await api("remote_access"); renderRemoteAccess(); showToast("远程出口资料已刷新"); }
+    catch (error) { showToast(error.message, true); }
+  });
   $("#confirm-ports").addEventListener("click", confirmPorts);
   $("#apply-config").addEventListener("click", applyConfig);
   $("#dashboard-filter").addEventListener("click", () => setPage("devices"));

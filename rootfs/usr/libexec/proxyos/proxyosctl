@@ -7,6 +7,8 @@ DEVICES_FILE="${STATE_DIR}/devices.json"
 PRESENCE_STATE_FILE="${STATE_DIR}/device-presence.json"
 PRESENCE_FILE="/tmp/proxyos/device-presence.json"
 SUBSCRIPTIONS_FILE="${STATE_DIR}/subscriptions.json"
+REMOTE_ACCESS_FILE="${STATE_DIR}/remote-access.json"
+TUNNEL_FILE="${STATE_DIR}/tunnel.json"
 TEMPLATE_FILE="${STATE_DIR}/config-template.json"
 ACTIVE_CONFIG="${STATE_DIR}/sing-box.json"
 LAST_GOOD_CONFIG="${STATE_DIR}/sing-box.last-good.json"
@@ -16,9 +18,10 @@ SINGBOX="${PROXYOS_SINGBOX:-/usr/bin/sing-box}"
 PORT_ROLLBACK_FLAG="/tmp/proxyos-port-rollback.pending"
 PORT_ROLLBACK_CONFIG="/tmp/proxyos-network.rollback"
 VERSION_FILE="${STATE_DIR}/version"
+TAILSCALE_SOCKET="/var/run/tailscale/tailscaled.sock"
 
 proxyos_version() {
-	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc7'
+	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc8'
 }
 
 json_error() {
@@ -118,6 +121,8 @@ ensure_state() {
 		if [ -s "$PRESENCE_STATE_FILE" ]; then cp "$PRESENCE_STATE_FILE" "$PRESENCE_FILE"; else printf '[]\n' > "$PRESENCE_FILE"; fi
 	fi
 	[ -s "$SUBSCRIPTIONS_FILE" ] || printf '[]\n' > "$SUBSCRIPTIONS_FILE"
+	[ -s "$REMOTE_ACCESS_FILE" ] || printf '%s\n' '{"enabled":false,"wan_enabled":false,"port":10808,"users":[]}' > "$REMOTE_ACCESS_FILE"
+	[ -s "$TUNNEL_FILE" ] || printf '%s\n' '{"auth_url":""}' > "$TUNNEL_FILE"
 	# rpcd starts one proxyosctl process per method. A fixed migration
 	# filename lets concurrent dashboard requests overwrite each other.
 	if ! jq -e 'all(.[];
@@ -1197,6 +1202,8 @@ device_bind() {
 	mac="$(printf '%s' "$input" | jq -r '.mac // empty' | tr 'a-f' 'A-F')"
 	ip="$(printf '%s' "$input" | jq -r '.ip // empty')"
 	name="$(printf '%s' "$input" | jq -r '.name // "Unknown device"')"
+	connection="$(printf '%s' "$input" | jq -r '.connection // ""')"
+	device_type="$(printf '%s' "$input" | jq -r '.type // "other"')"
 	last_seen="$(date +%s)"
 	custom_name="$(printf '%s' "$input" | jq -r '.custom_name // false')"
 	policy="$(printf '%s' "$input" | jq -r '.policy // "system_default"')"
@@ -1214,6 +1221,8 @@ device_bind() {
 	case "$failure_mode" in block|backup|direct) ;; *) json_error "Invalid node failure mode" ;; esac
 	case "$auto_source" in all|manual|subscription) ;; *) json_error "Invalid automatic-node source" ;; esac
 	case "$custom_name" in true|false) ;; *) json_error "Invalid custom-name flag" ;; esac
+	case "$connection" in ''|lan|wifi|wifi_external_ap|wifi_external_router|external_ap_device|external_router_device|router_downstream|lan_bridge_downstream) ;; *) json_error "Invalid device connection type" ;; esac
+	case "$device_type" in computer|phone|other|external_client|access_point|router) ;; *) device_type="other" ;; esac
 	if [ "$policy" = "fixed_node" ]; then
 		jq -e --arg id "$node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
 			json_error "Selected node does not exist"
@@ -1232,7 +1241,7 @@ device_bind() {
 	fi
 
 	device_json="$(jq -n \
-		--arg mac "$mac" --arg ip "$ip" --arg name "$name" \
+		--arg mac "$mac" --arg ip "$ip" --arg name "$name" --arg connection "$connection" --arg type "$device_type" \
 		--argjson custom_name "$custom_name" \
 		--argjson last_seen "$last_seen" \
 		--arg policy "$policy" --arg node_id "$node_id" \
@@ -1241,6 +1250,8 @@ device_bind() {
 			mac:$mac,
 			ip:$ip,
 			name:$name,
+			connection:$connection,
+			type:$type,
 			custom_name:$custom_name,
 			last_seen:$last_seen,
 			policy:$policy,
@@ -1344,6 +1355,249 @@ devices_assign_node() {
 		'{ok:true,assigned_count:$assigned_count}'
 }
 
+tunnel_status() {
+	installed=false
+	running=false
+	connected=false
+	backend_state="NotInstalled"
+	ipv4=""
+	ipv6=""
+	dns_name=""
+	auth_url="$(jq -r '.auth_url // empty' "$TUNNEL_FILE" 2>/dev/null || true)"
+	if command -v tailscale >/dev/null 2>&1 && command -v tailscaled >/dev/null 2>&1; then
+		installed=true
+		pidof tailscaled >/dev/null 2>&1 && running=true
+		if [ "$running" = "true" ]; then
+			tunnel_json="$(tailscale --socket="$TAILSCALE_SOCKET" status --json 2>/dev/null || printf '{}')"
+			backend_state="$(printf '%s' "$tunnel_json" | jq -r '.BackendState // "NeedsLogin"')"
+			status_auth_url="$(printf '%s' "$tunnel_json" | jq -r '.AuthURL // empty')"
+			[ -z "$status_auth_url" ] || auth_url="$status_auth_url"
+			ipv4="$(printf '%s' "$tunnel_json" | jq -r '[.TailscaleIPs[]? | select(startswith("100."))][0] // empty')"
+			ipv6="$(printf '%s' "$tunnel_json" | jq -r '[.TailscaleIPs[]? | select(contains(":"))][0] // empty')"
+			dns_name="$(printf '%s' "$tunnel_json" | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+			[ "$backend_state" = "Running" ] && [ -n "$ipv4$ipv6" ] && connected=true
+		fi
+	fi
+	[ "$connected" = "true" ] && auth_url=""
+	jq -n --argjson installed "$installed" --argjson running "$running" --argjson connected "$connected" \
+		--arg state "$backend_state" --arg ipv4 "$ipv4" --arg ipv6 "$ipv6" --arg dns "$dns_name" --arg auth "$auth_url" \
+		'{installed:$installed,running:$running,connected:$connected,state:$state,ipv4:$ipv4,ipv6:$ipv6,dns_name:$dns,auth_url:$auth}'
+}
+
+tunnel_connect() {
+	command -v tailscale >/dev/null 2>&1 && command -v tailscaled >/dev/null 2>&1 ||
+		json_error "Tailscale is not installed in this firmware"
+	/etc/init.d/tailscaled enable >/dev/null 2>&1 || true
+	/etc/init.d/tailscaled start >/dev/null 2>&1 || true
+	sleep 2
+	# `tailscale login` prints an interactive authorization URL while keeping all
+	# route/DNS integration disabled. Its own --timeout flag is used because the
+	# minimal OpenWrt image does not ship the external `timeout` command.
+	connect_output="$(tailscale --socket="$TAILSCALE_SOCKET" login --timeout=6s \
+		--accept-dns=false --accept-routes=false --advertise-exit-node=false \
+		--netfilter-mode=off --hostname=ProxyOS 2>&1 || true)"
+	auth_url="$(printf '%s\n' "$connect_output" | grep -Eo 'https://login\.tailscale\.com/[^[:space:]]+' | head -n 1)"
+	auth_attempt=0
+	while [ -z "$auth_url" ] && [ "$auth_attempt" -lt 5 ]; do
+		auth_attempt=$((auth_attempt + 1))
+		auth_url="$(tailscale --socket="$TAILSCALE_SOCKET" status --json 2>/dev/null | jq -r '.AuthURL // empty' || true)"
+		[ -n "$auth_url" ] || sleep 1
+	done
+	[ -n "$auth_url" ] || json_error "Tailscale started, but no authorization URL was returned; please retry"
+	jq -n --arg url "$auth_url" '{auth_url:$url}' > "${TUNNEL_FILE}.tmp.$$" && mv "${TUNNEL_FILE}.tmp.$$" "$TUNNEL_FILE"
+	# Apply the isolated tunnel firewall only after the control server has
+	# returned an authorization URL; reloading fw4 beforehand can interrupt that
+	# short-lived request on some OpenWrt/network-driver combinations.
+	sync_remote_firewall || json_error "Tailscale started, but the tunnel firewall rule could not be applied"
+	tunnel_status
+}
+
+tunnel_logout() {
+	if command -v tailscale >/dev/null 2>&1 && pidof tailscaled >/dev/null 2>&1; then
+		tailscale --socket="$TAILSCALE_SOCKET" logout >/dev/null 2>&1 || true
+	fi
+	printf '%s\n' '{"auth_url":""}' > "$TUNNEL_FILE"
+	tunnel_status
+}
+
+remote_access_sync_users() {
+	live_devices="$(devices)"
+	lan_computers="$(printf '%s' "$live_devices" | jq -c '[
+		.items[] |
+		select(.connection == "lan" or ((.connection // "") == "" and .online == true)) |
+		# Hostnames and vendor databases do not always identify a Windows PC.
+		# Accept an unknown/other endpoint only when it is directly on LAN, while
+		# explicitly excluding every known infrastructure and non-PC class.
+		select((.type // "") as $type | (["access_point","router","phone","tablet","tv","game_console"] | index($type)) == null) |
+		select((.name // "" | ascii_downcase) as $name |
+			((($name | contains("wifi")) or ($name | contains("wi-fi")) or ($name | contains("wireless"))) | not)) |
+		select((.mac // "") != "") |
+		{mac:(.mac | ascii_upcase),name:(.name // "LAN computer"),ip:(.ip // ""),online:(.online // false),type:"computer",connection:"lan"}
+	]')"
+	wan_file="/tmp/proxyos-remote-wans.$$.jsonl"
+	: > "$wan_file"
+	for network_name in $(uci show network 2>/dev/null | sed -n "s/^network\.\([^.]*\)=interface$/\1/p"); do
+		case "$network_name" in wan|wan[0-9]*) ;; *) continue ;; esac
+		wan_status="$(ubus call "network.interface.${network_name}" status 2>/dev/null || printf '{}')"
+		printf '%s' "$wan_status" | jq -e '.up == true and any(.route[]?; .target == "0.0.0.0" and (.mask // 0) == 0)' >/dev/null 2>&1 || continue
+		wan_device="$(printf '%s' "$wan_status" | jq -r '.l3_device // .device // empty')"
+		[ -n "$wan_device" ] || continue
+		wan_ip="$(printf '%s' "$wan_status" | jq -r '.["ipv4-address"][0].address // empty')"
+		public_ipv6="$(ip -6 -o addr show dev "$wan_device" scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print a[1]}')"
+		public_ip=""
+		public_cache="/tmp/proxyos-remote-public-${network_name}"
+		if [ "${PROXYOS_SKIP_PUBLIC_IP:-0}" != "1" ]; then
+			cache_age=999999
+			if [ -s "$public_cache" ]; then
+				cache_time="$(stat -c %Y "$public_cache" 2>/dev/null || printf '0')"
+				now_time="$(date +%s)"
+				cache_age=$((now_time - cache_time))
+			fi
+			if [ "$cache_age" -gt 300 ]; then
+				# Bind the source address rather than the device name. sing-box TUN
+				# auto-redirect can intercept SO_BINDTODEVICE traffic, while binding
+				# the WAN address remains compatible with OpenWrt multi-WAN routing.
+				curl_bind="$wan_ip"
+				[ -n "$curl_bind" ] || curl_bind="$wan_device"
+				candidate_ip="$(curl -4 -fsS --interface "$curl_bind" --connect-timeout 2 --max-time 4 https://ifconfig.me/ip 2>/dev/null | tr -d '\r\n ' || true)"
+				printf '%s' "$candidate_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' && printf '%s\n' "$candidate_ip" > "$public_cache"
+			fi
+			public_ip="$(cat "$public_cache" 2>/dev/null | tr -d '\r\n ' || true)"
+		fi
+		jq -nc --arg mac "__WAN__:${network_name}" --arg name "WAN · ${network_name}" --arg ip "$wan_ip" \
+			--arg public_ip "$public_ip" --arg public_ipv6 "$public_ipv6" --arg interface "$network_name" --arg device "$wan_device" \
+			'{mac:$mac,name:$name,ip:$ip,public_ip:$public_ip,public_ipv6:$public_ipv6,online:true,type:"broadband",connection:"wan",interface:$interface,bind_interface:$device}' >> "$wan_file"
+	done
+	[ -s "$wan_file" ] || jq -nc '{mac:"__WAN__:wan",name:"WAN · wan",ip:"",online:false,type:"broadband",connection:"wan",interface:"wan",bind_interface:""}' > "$wan_file"
+	wan_profiles="$(jq -s '.' "$wan_file")"
+	rm -f "$wan_file"
+	eligible_devices="$(jq -n --argjson lan "$lan_computers" --argjson wan "$wan_profiles" '$wan + $lan')"
+	remote_tmp="${REMOTE_ACCESS_FILE}.tmp.$$"
+	printf '%s' "$eligible_devices" | jq -c '.[]' | while IFS= read -r remote_device; do
+		remote_mac="$(printf '%s' "$remote_device" | jq -r '.mac')"
+		if ! jq -e --arg mac "$remote_mac" 'any(.users[]?; .mac == $mac)' "$REMOTE_ACCESS_FILE" >/dev/null 2>&1; then
+		case "$remote_mac" in __WAN__:*) remote_username="wan-$(printf '%s' "$remote_mac" | cut -d: -f2 | tr -dc 'A-Za-z0-9_-')" ;; *) remote_username="pc-$(printf '%s' "$remote_mac" | tr -d ':' | tr 'A-Z' 'a-z')" ;; esac
+			remote_password="$(dd if=/dev/urandom bs=1 count=18 2>/dev/null | base64 | tr -dc 'A-Za-z0-9' | cut -c 1-24)"
+			[ "${#remote_password}" -ge 16 ] || remote_password="$(date +%s)$(printf '%s' "$remote_mac" | tr -d ':')"
+			jq --arg mac "$remote_mac" --arg username "$remote_username" --arg password "$remote_password" --argjson profile "$remote_device" \
+				'.users += [({mac:$mac,username:$username,password:$password,enabled:true} + ($profile | {interface,bind_interface,public_ip,public_ipv6}))]' \
+				"$REMOTE_ACCESS_FILE" > "$remote_tmp" && mv "$remote_tmp" "$REMOTE_ACCESS_FILE"
+		fi
+	done
+	jq --argjson profiles "$eligible_devices" '
+		.users |= map(
+			. as $user |
+			([ $profiles[] | select(.mac == $user.mac) ][0] // null) as $profile |
+			select($profile != null) |
+			$user + ($profile | {interface,bind_interface,public_ip,public_ipv6})
+		)
+	' "$REMOTE_ACCESS_FILE" > "$remote_tmp" && mv "$remote_tmp" "$REMOTE_ACCESS_FILE"
+	printf '%s' "$eligible_devices"
+}
+
+remote_access() {
+	eligible_devices="$(remote_access_sync_users)"
+	jq -n --argjson settings "$(cat "$REMOTE_ACCESS_FILE")" --argjson devices "$eligible_devices" \
+		--slurpfile saved "$DEVICES_FILE" --slurpfile nodes "$NODES_FILE" '
+		def node_name($id): ([ $nodes[0][] | select(.id == $id) | .name ][0] // "");
+		{
+			enabled:($settings.enabled // false),
+			wan_enabled:($settings.wan_enabled // false),
+			port:($settings.port // 10808),
+			wan_ip:([ $devices[] | select(.connection == "wan") | .ip ][0] // ""),
+			public_ip:([ $devices[] | select(.connection == "wan" and (.public_ip // "") != "") | .public_ip ][0] // ""),
+			public_ipv6:([ $devices[] | select(.connection == "wan" and (.public_ipv6 // "") != "") | .public_ipv6 ][0] // ""),
+			items:[
+				$devices[] as $live |
+				([ $saved[0][] | select(.mac == $live.mac) ][0] // {}) as $device |
+				([ $settings.users[]? | select(.mac == $live.mac) ][0] // {}) as $user |
+				$live + {
+					username:($user.username // ""),password:($user.password // ""),
+					credential_enabled:($user.enabled // true),
+					policy:(if ($live.mac | startswith("__WAN__:")) then "direct" else ($device.policy // "system_default") end),node_id:($device.node_id // ""),
+					node_name:node_name($device.node_id // "")
+				}
+			]
+		}'
+}
+
+sync_remote_firewall() {
+	[ "${PROXYOS_SKIP_FIREWALL:-0}" = "1" ] && return 0
+	remote_enabled="$(jq -r '.enabled // false' "$REMOTE_ACCESS_FILE")"
+	remote_wan="$(jq -r '.wan_enabled // false' "$REMOTE_ACCESS_FILE")"
+	remote_port="$(jq -r '.port // 10808' "$REMOTE_ACCESS_FILE")"
+	uci -q delete firewall.proxyos_remote || true
+	uci -q delete firewall.proxyos_tunnel_remote || true
+	uci set network.proxyos_tunnel='interface'
+	uci set network.proxyos_tunnel.proto='none'
+	uci set network.proxyos_tunnel.device='tailscale0'
+	uci set firewall.proxyos_tunnel='zone'
+	uci set firewall.proxyos_tunnel.name='proxyos_tunnel'
+	uci -q delete firewall.proxyos_tunnel.network || true
+	uci add_list firewall.proxyos_tunnel.network='proxyos_tunnel'
+	uci set firewall.proxyos_tunnel.input='REJECT'
+	uci set firewall.proxyos_tunnel.output='ACCEPT'
+	uci set firewall.proxyos_tunnel.forward='REJECT'
+	if [ "$remote_enabled" = "true" ] && [ "$remote_wan" = "true" ]; then
+		uci set firewall.proxyos_remote='rule'
+		uci set firewall.proxyos_remote.name='ProxyOS remote egress'
+		uci set firewall.proxyos_remote.src='wan'
+		uci set firewall.proxyos_remote.proto='tcp'
+		uci set "firewall.proxyos_remote.dest_port=${remote_port}"
+		uci set firewall.proxyos_remote.target='ACCEPT'
+	fi
+	if [ "$remote_enabled" = "true" ]; then
+		uci set firewall.proxyos_tunnel_remote='rule'
+		uci set firewall.proxyos_tunnel_remote.name='ProxyOS tunnel remote egress'
+		uci set firewall.proxyos_tunnel_remote.src='proxyos_tunnel'
+		uci set firewall.proxyos_tunnel_remote.proto='tcp'
+		uci set "firewall.proxyos_tunnel_remote.dest_port=${remote_port}"
+		uci set firewall.proxyos_tunnel_remote.target='ACCEPT'
+	fi
+	uci commit network
+	uci commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1
+}
+
+remote_access_apply() {
+	input="$1"
+	enabled="$(printf '%s' "$input" | jq -r '.enabled // false')"
+	wan_enabled="$(printf '%s' "$input" | jq -r '.wan_enabled // false')"
+	port="$(printf '%s' "$input" | jq -r '.port // 10808')"
+	case "$enabled" in true|false) ;; *) json_error "Invalid remote-access state" ;; esac
+	case "$wan_enabled" in true|false) ;; *) json_error "Invalid WAN-access state" ;; esac
+	printf '%s' "$port" | grep -Eq '^[0-9]+$' || json_error "Invalid remote-access port"
+	[ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || json_error "Remote-access port must be between 1024 and 65535"
+	remote_rollback="${REMOTE_ACCESS_FILE}.rollback.$$"
+	cp "$REMOTE_ACCESS_FILE" "$remote_rollback"
+	jq --argjson enabled "$enabled" --argjson wan "$wan_enabled" --argjson port "$port" \
+		'.enabled=$enabled | .wan_enabled=$wan | .port=$port' "$REMOTE_ACCESS_FILE" > "${REMOTE_ACCESS_FILE}.tmp.$$" &&
+		mv "${REMOTE_ACCESS_FILE}.tmp.$$" "$REMOTE_ACCESS_FILE"
+	remote_access_sync_users >/dev/null
+	if ! apply_generated_config_raw; then
+		mv "$remote_rollback" "$REMOTE_ACCESS_FILE"
+		json_error "$APPLY_ERROR"
+	fi
+	rm -f "$remote_rollback"
+	remote_access
+}
+
+remote_access_rotate() {
+	input="$1"
+	mac="$(printf '%s' "$input" | jq -r '.mac // empty')"
+	case "$mac" in __WAN__:*) ;; *) mac="$(printf '%s' "$mac" | tr 'a-f' 'A-F')" ;; esac
+	case "$mac" in __WAN__:*) ;; *) printf '%s' "$mac" | grep -Eq '^([0-9A-F]{2}:){5}[0-9A-F]{2}$' || json_error "Invalid remote profile" ;; esac
+	remote_access_sync_users >/dev/null
+	jq -e --arg mac "$mac" 'any(.users[]?; .mac == $mac)' "$REMOTE_ACCESS_FILE" >/dev/null ||
+		json_error "Only directly connected LAN computers can have remote credentials"
+	password="$(dd if=/dev/urandom bs=1 count=18 2>/dev/null | base64 | tr -dc 'A-Za-z0-9' | cut -c 1-24)"
+	[ "${#password}" -ge 16 ] || password="$(date +%s)$(printf '%s' "$mac" | tr -d ':')"
+	jq --arg mac "$mac" --arg password "$password" '.users |= map(if .mac == $mac then .password=$password else . end)' \
+		"$REMOTE_ACCESS_FILE" > "${REMOTE_ACCESS_FILE}.tmp.$$" && mv "${REMOTE_ACCESS_FILE}.tmp.$$" "$REMOTE_ACCESS_FILE"
+	if ! apply_generated_config_raw; then json_error "$APPLY_ERROR"; fi
+	remote_access
+}
+
 generate_config() {
 	tmp_base="/tmp/proxyos-config-base.$$.json"
 	tmp_rules="/tmp/proxyos-config-rules.$$.json"
@@ -1351,10 +1605,19 @@ generate_config() {
 	default_node="$(uci -q get proxyos.main.default_node_id || true)"
 	default_policy="$(uci -q get proxyos.main.default_policy || printf 'direct')"
 
-	jq -n --slurpfile template "$TEMPLATE_FILE" --slurpfile nodes "$NODES_FILE" '
+	jq -n --slurpfile template "$TEMPLATE_FILE" --slurpfile nodes "$NODES_FILE" --slurpfile remote "$REMOTE_ACCESS_FILE" '
 		($template[0]) as $base |
 		($nodes[0] // []) as $nodes |
+		($remote[0] // {}) as $remote |
 		$base |
+		.inbounds = (
+			.inbounds +
+			(if ($remote.enabled // false) and (($remote.users // []) | length) > 0 then [{
+				type:"mixed",tag:"proxyos-remote",listen:"::",
+				listen_port:($remote.port // 10808),
+				users:[ $remote.users[] | select(.enabled // true) | {username,password} ]
+			}] else [] end)
+		) |
 		# A node hostname must be resolved before that node can carry traffic.
 		# Pin bootstrap resolution to the direct DNS server so per-device DNS
 		# routing cannot recursively send the lookup through the same node.
@@ -1365,6 +1628,11 @@ generate_config() {
 					domain_resolver:"dns-direct"
 				}
 			)) +
+			[
+				$remote.users[]? |
+				select((.mac | startswith("__WAN__:")) and (.bind_interface // "") != "") |
+				{type:"direct",tag:("direct-wan-" + .interface),bind_interface:.bind_interface,domain_resolver:"dns-direct"}
+			] +
 			[{type:"direct",tag:"direct"}]
 		) |
 		.dns.servers = (
@@ -1385,8 +1653,9 @@ generate_config() {
 		)
 	' > "$tmp_base"
 
-	jq -n --slurpfile devices "$DEVICES_FILE" --slurpfile nodes "$NODES_FILE" '
+	jq -n --slurpfile devices "$DEVICES_FILE" --slurpfile nodes "$NODES_FILE" --slurpfile remote "$REMOTE_ACCESS_FILE" '
 		($nodes[0] // []) as $node_list |
+		($remote[0] // {}) as $remote |
 		def usable($id):
 			any($node_list[]; .id == $id and (.enabled // true) and (.status // "unknown") != "error");
 		def fallback($device):
@@ -1459,6 +1728,26 @@ generate_config() {
 						end
 					)
 				}
+			],
+			remote_block:[
+				$resolved[] as $device |
+				$remote.users[]? |
+				select(($remote.enabled // false) and (.enabled // true) and .mac == $device.mac and $device.effective_outbound == "__block__") |
+				{inbound:["proxyos-remote"],auth_user:[.username],action:"reject",method:"drop"}
+			],
+			remote_route:[
+				($remote.users[]? | select(($remote.enabled // false) and (.enabled // true) and (.mac | startswith("__WAN__:"))) | {inbound:["proxyos-remote"],auth_user:[.username],action:"route",outbound:(if (.bind_interface // "") != "" then "direct-wan-" + .interface else "direct" end)}),
+				$resolved[] as $device |
+				$remote.users[]? |
+				select(($remote.enabled // false) and (.enabled // true) and .mac == $device.mac and $device.effective_outbound != "" and $device.effective_outbound != "__block__") |
+				{inbound:["proxyos-remote"],auth_user:[.username],action:"route",outbound:(if $device.effective_outbound == "__direct__" then "direct" else "node-" + $device.effective_outbound end)}
+			],
+			remote_dns:[
+				($remote.users[]? | select(($remote.enabled // false) and (.enabled // true) and (.mac | startswith("__WAN__:"))) | {inbound:["proxyos-remote"],auth_user:[.username],action:"route",server:"dns-direct"}),
+				$resolved[] as $device |
+				$remote.users[]? |
+				select(($remote.enabled // false) and (.enabled // true) and .mac == $device.mac and $device.effective_outbound != "__block__") |
+				{inbound:["proxyos-remote"],auth_user:[.username],action:"route",server:(if $device.effective_outbound == "" or $device.effective_outbound == "__direct__" then "dns-direct" else "dns-node-" + $device.effective_outbound end)}
 			]
 		}
 	' > "$tmp_rules"
@@ -1475,8 +1764,11 @@ generate_config() {
 	jq --slurpfile device_rules "$tmp_rules" --arg final "$final_outbound" --argjson default_block "$default_block" '
 		.route.rules = (
 			[
+				{process_name:["tailscaled"],action:"route",outbound:"direct"},
 				{action:"sniff"}
 			] +
+			($device_rules[0].remote_block // []) +
+			($device_rules[0].remote_route // []) +
 			($device_rules[0].block // []) +
 			[
 				{inbound:"proxyos-dns-in",action:"hijack-dns"},
@@ -1487,7 +1779,7 @@ generate_config() {
 			(if $default_block then [{action:"reject",method:"drop"}] else [] end)
 		) |
 		.route.final = $final |
-		.dns.rules = ($device_rules[0].dns // [])
+		.dns.rules = (($device_rules[0].remote_dns // []) + ($device_rules[0].dns // []))
 	' "$tmp_base" > "$candidate_path"
 
 	rm -f "$tmp_base" "$tmp_rules"
@@ -1540,6 +1832,10 @@ apply_generated_config_raw() {
 			APPLY_ERROR="无法应用设备禁止联网防火墙规则"
 			return 1
 		}
+		sync_remote_firewall || {
+			APPLY_ERROR="Remote-access firewall rules could not be applied"
+			return 1
+		}
 		return 0
 	fi
 	restart_proxy_service || {
@@ -1552,6 +1848,10 @@ apply_generated_config_raw() {
 	}
 	sync_block_firewall || {
 		APPLY_ERROR="代理配置已启动，但无法应用设备禁止联网防火墙规则"
+		return 1
+	}
+	sync_remote_firewall || {
+		APPLY_ERROR="Proxy configuration started, but the remote-access firewall rule failed"
 		return 1
 	}
 	return 0
@@ -1780,7 +2080,11 @@ wifi_disconnect() {
 }
 
 ports() {
-	wan_device="$(uci -q get network.wan.device || true)"
+	wan_devices=""
+	for wan_section in $(uci show network 2>/dev/null | sed -n "s/^network\.\(wan[0-9]*\)=interface$/\1/p"); do
+		wan_member="$(uci -q get "network.${wan_section}.device" || true)"
+		[ -z "$wan_member" ] || wan_devices="${wan_devices} ${wan_member}"
+	done
 	lan_ports="$(uci -q get network.br_lan.ports || true)"
 	if [ -z "$lan_ports" ] && [ -d /sys/class/net/br-lan/brif ]; then
 		for lan_member in /sys/class/net/br-lan/brif/*; do
@@ -1796,7 +2100,7 @@ ports() {
 		speed="$(cat "/sys/class/net/${iface}/speed" 2>/dev/null || printf '0')"
 		driver="$(basename "$(readlink -f "/sys/class/net/${iface}/device/driver" 2>/dev/null || true)")"
 		role="unused"
-		[ "$iface" = "$wan_device" ] && role="wan"
+		printf ' %s ' "$wan_devices" | grep -q " ${iface} " && role="wan"
 		printf ' %s ' "$lan_ports" | grep -q " ${iface} " && role="lan"
 		jq -nc \
 			--arg name "$iface" --arg mac "$mac" --arg state "$state" \
@@ -1813,10 +2117,13 @@ ports_apply() {
 	assignments="$(printf '%s' "$input" | jq -r '.assignments_json // empty')"
 	printf '%s' "$assignments" | jq -e 'type == "array"' >/dev/null 2>&1 ||
 		json_error "assignments_json must be an array"
-	[ "$(printf '%s' "$assignments" | jq '[.[] | select(.role == "wan")] | length')" = "1" ] ||
-		json_error "Exactly one WAN port is required"
-	[ "$(printf '%s' "$assignments" | jq '[.[] | select(.role == "lan")] | length')" -ge 1 ] ||
-		json_error "At least one LAN port is required"
+	port_count="$(printf '%s' "$assignments" | jq 'length')"
+	wan_count="$(printf '%s' "$assignments" | jq '[.[] | select(.role == "wan")] | length')"
+	lan_count="$(printf '%s' "$assignments" | jq '[.[] | select(.role == "lan")] | length')"
+	[ "$wan_count" -ge 1 ] || json_error "At least one WAN port is required"
+	if [ "$port_count" -gt 1 ] && [ "$lan_count" -lt 1 ]; then
+		json_error "At least one LAN port is required when two or more ports are present"
+	fi
 
 	for iface in $(printf '%s' "$assignments" | jq -r '.[].name'); do
 		case "$iface" in *[!A-Za-z0-9_.:-]*) json_error "Invalid interface name" ;; esac
@@ -1825,12 +2132,10 @@ ports_apply() {
 
 	cp /etc/config/network "$PORT_ROLLBACK_CONFIG"
 	touch "$PORT_ROLLBACK_FLAG"
-	wan_iface="$(printf '%s' "$assignments" | jq -r '.[] | select(.role == "wan") | .name')"
-
+	for old_wan in $(uci show network 2>/dev/null | sed -n "s/^network\.\(wan[0-9]*\)=interface$/\1/p"); do
+		uci -q delete "network.${old_wan}" || true
+	done
 	uci -q batch <<-EOF
-		set network.wan='interface'
-		set network.wan.proto='dhcp'
-		set network.wan.device='${wan_iface}'
 		set network.br_lan='device'
 		set network.br_lan.name='br-lan'
 		set network.br_lan.type='bridge'
@@ -1841,10 +2146,30 @@ ports_apply() {
 		set network.lan.ipaddr='192.168.10.1'
 		set network.lan.netmask='255.255.255.0'
 	EOF
+	wan_index=1
+	for iface in $(printf '%s' "$assignments" | jq -r '.[] | select(.role == "wan") | .name'); do
+		if [ "$wan_index" -eq 1 ]; then wan_name="wan"; else wan_name="wan${wan_index}"; fi
+		uci set "network.${wan_name}=interface"
+		uci set "network.${wan_name}.proto=dhcp"
+		uci set "network.${wan_name}.device=${iface}"
+		uci set "network.${wan_name}.metric=$((wan_index * 10))"
+		wan_index=$((wan_index + 1))
+	done
 	for iface in $(printf '%s' "$assignments" | jq -r '.[] | select(.role == "lan") | .name'); do
 		uci add_list "network.br_lan.ports=${iface}"
 	done
 	uci commit network
+	wan_zone="$(uci show firewall 2>/dev/null | sed -n "s/^\(firewall\.[^.]*\)\.name='wan'$/\1/p" | head -n 1)"
+	if [ -n "$wan_zone" ]; then
+		uci -q delete "${wan_zone}.network" || true
+		wan_index=1
+		while [ "$wan_index" -le "$wan_count" ]; do
+			if [ "$wan_index" -eq 1 ]; then wan_name="wan"; else wan_name="wan${wan_index}"; fi
+			uci add_list "${wan_zone}.network=${wan_name}"
+			wan_index=$((wan_index + 1))
+		done
+		uci commit firewall
+	fi
 
 	nohup sh -c '
 		sleep 90
@@ -2130,7 +2455,7 @@ policy_apply() {
 
 backup_create() {
 	archive="/tmp/proxyos-backup.$$.tar.gz"
-	files="etc/proxyos/nodes.json etc/proxyos/devices.json etc/proxyos/subscriptions.json etc/proxyos/config-template.json etc/config/proxyos etc/config/network etc/config/dhcp etc/config/wireless etc/config/firewall"
+	files="etc/proxyos/nodes.json etc/proxyos/devices.json etc/proxyos/subscriptions.json etc/proxyos/remote-access.json etc/proxyos/config-template.json etc/config/proxyos etc/config/network etc/config/dhcp etc/config/wireless etc/config/firewall"
 	(
 		cd /
 		existing=""
@@ -2217,6 +2542,26 @@ system_logs() {
 	jq -n --arg text "$logs" '{items:($text | split("\n") | map(select(length > 0)))}'
 }
 
+version_is_newer() {
+	candidate="${1#v}"
+	current="${2#v}"
+	[ "$candidate" != "$current" ] || return 1
+	candidate_core="${candidate%%-*}"
+	current_core="${current%%-*}"
+	if [ "$candidate_core" != "$current_core" ]; then
+		newest_core="$(printf '%s\n%s\n' "$current_core" "$candidate_core" | sort -V | tail -n 1)"
+		[ "$newest_core" = "$candidate_core" ]
+		return
+	fi
+	case "$candidate" in *-*) candidate_pre="${candidate#*-}" ;; *) candidate_pre="" ;; esac
+	case "$current" in *-*) current_pre="${current#*-}" ;; *) current_pre="" ;; esac
+	# A stable release is newer than a prerelease with the same numeric core.
+	[ -n "$candidate_pre" ] || { [ -n "$current_pre" ]; return; }
+	[ -n "$current_pre" ] || return 1
+	newest_pre="$(printf '%s\n%s\n' "$current_pre" "$candidate_pre" | sort -V | tail -n 1)"
+	[ "$newest_pre" = "$candidate_pre" ] && [ "$candidate_pre" != "$current_pre" ]
+}
+
 update_check() {
 	current_version="$(proxyos_version)"
 	release_api="$(uci -q get proxyos.main.release_api || printf 'https://api.github.com/repos/t2459666333-cloud/proxyos-alpha/releases/latest')"
@@ -2259,7 +2604,7 @@ update_check() {
 	printf '%s' "$latest_version" | grep -Eq '^[0-9][0-9A-Za-z.-]*$' ||
 		json_error "Update service returned no valid version"
 	available=false
-	[ "$latest_version" = "$current_version" ] || available=true
+	version_is_newer "$latest_version" "$current_version" && available=true
 	jq -n --arg current "$current_version" --arg latest "$latest_version" \
 		--arg url "$release_url" --argjson available "$available" \
 		'{ok:true,current_version:$current,latest_version:$latest,available:$available,source_available:true,release_url:$url}'
@@ -2311,7 +2656,7 @@ require_commands
 ensure_state
 
 case "$command_name" in
-	node-add|node-update|node-delete|node-test|device-bind|devices-assign-node|wifi-toggle|wifi-apply|wifi-disconnect|ports-apply|ports-confirm|subscription-add|subscription-save|subscription-update|subscription-delete|policy-apply|backup-restore|password-set|system-reboot|apply)
+	node-add|node-update|node-delete|node-test|device-bind|devices-assign-node|wifi-toggle|wifi-apply|wifi-disconnect|ports-apply|ports-confirm|subscription-add|subscription-save|subscription-update|subscription-delete|policy-apply|remote-access-apply|remote-access-rotate|tunnel-connect|tunnel-logout|backup-restore|password-set|system-reboot|apply)
 		acquire_mutation_lock
 		assert_state_writable
 		;;
@@ -2347,6 +2692,12 @@ case "$command_name" in
 	subscription-delete) subscription_delete "$input" ;;
 	policy-settings) policy_settings ;;
 	policy-apply) policy_apply "$input" ;;
+	remote-access) remote_access ;;
+	remote-access-apply) remote_access_apply "$input" ;;
+	remote-access-rotate) remote_access_rotate "$input" ;;
+	tunnel-status) tunnel_status ;;
+	tunnel-connect) tunnel_connect ;;
+	tunnel-logout) tunnel_logout ;;
 	backup-create) backup_create ;;
 	backup-restore) backup_restore "$input" ;;
 	password-set) password_set "$input" ;;

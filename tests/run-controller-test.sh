@@ -10,6 +10,18 @@ cp "${PROJECT_DIR}/rootfs/etc/proxyos/config-template.json" "${STATE_DIR}/config
 cp "${PROJECT_DIR}/tests/fixtures/nodes.json" "${STATE_DIR}/nodes.json"
 cp "${PROJECT_DIR}/tests/fixtures/devices.json" "${STATE_DIR}/devices.json"
 cp "${PROJECT_DIR}/rootfs/etc/proxyos/subscriptions.json" "${STATE_DIR}/subscriptions.json"
+cat > "${STATE_DIR}/remote-access.json" <<'EOF'
+{
+  "enabled": true,
+  "wan_enabled": true,
+  "port": 10808,
+  "users": [
+    {"mac":"AA:BB:CC:DD:EE:01","username":"lan-pc","password":"LanPassword123456","enabled":true},
+    {"mac":"AA:BB:CC:DD:EE:02","username":"blocked-pc","password":"BlockPassword123456","enabled":true},
+    {"mac":"__WAN__:wan2","username":"wan-wan2","password":"WanPassword123456","enabled":true,"interface":"wan2","bind_interface":"eth2"}
+  ]
+}
+EOF
 chmod 0755 \
   "${PROJECT_DIR}/tests/mocks/uci" \
   "${PROJECT_DIR}/tests/mocks/ubus" \
@@ -22,6 +34,7 @@ export PROXYOS_SKIP_FIREWALL=1
 export PROXYOS_SKIP_DHCP=1
 export PROXYOS_SKIP_PREFLIGHT=1
 export PROXYOS_PARSER="${PROJECT_DIR}/rootfs/usr/libexec/proxyos/subscription_parser.py"
+export PROXYOS_SKIP_PUBLIC_IP=1
 if [[ "${OS:-}" == "Windows_NT" ]]; then
   export PROXYOS_SKIP_CONFIG_CHECK=1
   export PROXYOS_PYTHON=python
@@ -34,6 +47,40 @@ fi
 
 PROXYOS_STATE_DIR="${STATE_DIR}" \
   "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" generate >/dev/null
+
+jq -e '
+  any(.inbounds[]; .tag == "proxyos-remote" and .type == "mixed" and .listen_port == 10808) and
+  any(.outbounds[]; .tag == "direct-wan-wan2" and .bind_interface == "eth2") and
+  any(.route.rules[]; .inbound == ["proxyos-remote"] and .auth_user == ["lan-pc"] and .outbound == "node-hk01") and
+  any(.route.rules[]; .inbound == ["proxyos-remote"] and .auth_user == ["blocked-pc"] and .action == "reject") and
+  any(.route.rules[]; .inbound == ["proxyos-remote"] and .auth_user == ["wan-wan2"] and .outbound == "direct-wan-wan2")
+' "${STATE_DIR}/sing-box.json" >/dev/null
+
+VERSION_TEST="${STATE_DIR}/version-compare.sh"
+sed -n '/^version_is_newer() {$/,/^}$/p' \
+  "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" > "${VERSION_TEST}"
+# shellcheck disable=SC1090
+. "${VERSION_TEST}"
+version_is_newer "0.3.0-rc7" "0.3.0-rc8" && {
+  echo "Older release candidates must not be offered as updates" >&2
+  exit 1
+}
+version_is_newer "0.3.0-rc9" "0.3.0-rc8" || {
+  echo "Newer release candidates must be detected" >&2
+  exit 1
+}
+version_is_newer "0.3.0" "0.3.0-rc8" || {
+  echo "A stable release must supersede its release candidate" >&2
+  exit 1
+}
+version_is_newer "0.3.0-rc8" "0.3.0" && {
+  echo "A release candidate must not replace the stable release" >&2
+  exit 1
+}
+version_is_newer "0.3.1" "0.3.0" || {
+  echo "A newer numeric version must be detected" >&2
+  exit 1
+}
 
 for list_command in devices nodes ports subscriptions; do
   PROXYOS_STATE_DIR="${STATE_DIR}" \

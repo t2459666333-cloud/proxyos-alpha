@@ -31,7 +31,9 @@ jobs:
             rootfs/usr/sbin/proxyos-watch-lan \
             rootfs/etc/init.d/proxyos-lan-watch \
             rootfs/etc/init.d/proxyos-platform-doctor \
-            rootfs/etc/init.d/proxyos-port-detect
+            rootfs/etc/init.d/proxyos-port-detect \
+            rootfs/etc/init.d/tailscaled \
+            rootfs/etc/hotplug.d/iface/95-proxyos-remote-access
       - name: Run controller integration checks
         run: |
           curl --fail --location --retry 3 \

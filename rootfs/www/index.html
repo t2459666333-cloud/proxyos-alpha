@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>ProxyOS</title>
-    <link rel="icon" type="image/svg+xml" href="/assets/proxyos-mark.svg?v=0.3.0rc7-4" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.3.0rc7-10" />
+    <link rel="icon" type="image/svg+xml" href="/assets/proxyos-mark.svg?v=0.3.0rc8-1" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.3.0rc8-1" />
   </head>
   <body>
     <div id="toast" class="toast" aria-live="polite"></div>
@@ -29,6 +29,7 @@
         <nav id="main-nav" class="main-nav">
           <button class="nav-item is-active" data-page="dashboard"><span class="icon" data-icon="home"></span><span>概览</span></button>
           <button class="nav-item" data-page="devices"><span class="icon" data-icon="monitor"></span><span>设备</span></button>
+          <button class="nav-item" data-page="remote"><span class="icon" data-icon="key"></span><span>远程出口</span></button>
           <button class="nav-item" data-page="nodes"><span class="icon" data-icon="globe"></span><span>节点</span></button>
           <button class="nav-item" data-page="subscriptions"><span class="icon" data-icon="folder"></span><span>订阅</span></button>
           <button class="nav-item" data-page="wifi"><span class="icon" data-icon="wifi"></span><span>Wi‑Fi</span></button>
@@ -106,6 +107,34 @@
           </article>
         </section>
 
+        <section id="page-remote" class="page">
+          <div class="page-title-row node-title">
+            <div><h1>远程出口</h1><p>让异地设备通过固定 HTTP / SOCKS5 凭据跟随本地有线电脑的出口策略。</p></div>
+            <span class="health-pill"><span class="icon" data-icon="shield"></span>强制身份验证</span>
+          </div>
+          <article class="panel tunnel-panel">
+            <div class="tunnel-identity"><span class="device-avatar remote-wan"><span class="icon" data-icon="network"></span></span><div><h2>内网穿透</h2><p id="tunnel-description">正在检测 Tailscale 隧道状态…</p></div></div>
+            <div class="tunnel-address"><small>异地连接地址</small><strong id="tunnel-address">尚未连接</strong></div>
+            <a id="tunnel-auth-link" class="button button-soft is-hidden" target="_blank" rel="noopener noreferrer">打开授权页面</a>
+            <button id="tunnel-connect" class="button button-primary" type="button">启用内网穿透</button>
+            <button id="tunnel-logout" class="button button-ghost is-hidden" type="button">退出隧道</button>
+          </article>
+          <article class="panel remote-settings-panel">
+            <form id="remote-access-form" class="remote-settings-form">
+              <label class="switch-row"><span><strong>启用远程出口服务</strong><small>同时提供 HTTP 与 SOCKS5，凭据不会因切换节点而改变</small></span><input id="remote-enabled" type="checkbox" /></label>
+              <label><span>监听端口</span><input id="remote-port" type="number" min="1024" max="65535" value="10808" /></label>
+              <label class="switch-row"><span><strong>允许从 WAN 访问</strong><small>仅在确实需要异地连接时开启；必须配合强密码</small></span><input id="remote-wan-enabled" type="checkbox" /></label>
+              <button class="button button-primary" type="submit">保存并应用</button>
+            </form>
+          </article>
+          <div class="notice warning remote-warning"><strong>连接条件</strong><span>异地设备需能访问此软路由的 WAN 地址；运营商 CGNAT 环境还需要公网 IP、端口映射或安全隧道。HTTP/SOCKS5 认证本身不加密，建议优先通过 WireGuard/Tailscale 隧道使用。</span></div>
+          <article class="panel remote-device-panel">
+            <div class="panel-head"><div><h2>可用有线电脑</h2><p>仅显示直接连接 ProxyOS LAN 口且识别为电脑的设备；不包含 Wi‑Fi、AP、路由器或其下属终端。</p></div><button id="remote-refresh" class="button button-ghost"><span class="icon" data-icon="refresh"></span>刷新</button></div>
+            <div class="table-wrap"><table class="data-table remote-table"><thead><tr><th>电脑</th><th>本地 IP</th><th>跟随策略</th><th>HTTP 连接</th><th>SOCKS5 连接</th><th>凭据</th><th>操作</th></tr></thead><tbody id="remote-device-body"></tbody></table></div>
+            <div class="table-foot" id="remote-device-count">共 0 台有线电脑</div>
+          </article>
+        </section>
+
         <section id="page-nodes" class="page">
           <div class="page-title-row node-title">
             <div><h1>节点管理</h1><p>管理所有代理节点，支持添加、编辑和测试节点连接</p></div>
@@ -162,7 +191,7 @@
 
         <section id="page-network" class="page">
           <div class="page-title-row node-title">
-            <div><h1>网络管理</h1><p>分配物理网口角色。系统默认第一个网口为 WAN，其余为 LAN。</p></div>
+            <div><h1>网络管理</h1><p>支持多 WAN 与多 LAN；两个及以上网口时至少各保留一个，单网口设备优先作为 WAN。</p></div>
             <button id="apply-ports" class="button button-primary">应用网口配置</button>
           </div>
           <div class="notice warning"><strong>安全回滚</strong><span>应用后请在 90 秒内确认，否则系统会自动恢复原配置。</span></div>
@@ -325,6 +354,6 @@
       </section>
     </div>
 
-    <script src="/assets/app.js?v=0.3.0rc7-10" type="module"></script>
+    <script src="/assets/app.js?v=0.3.0rc8-1" type="module"></script>
   </body>
 </html>

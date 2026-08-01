@@ -1,0 +1,46 @@
+#!/bin/sh
+
+# Keep remote HTTP/SOCKS5 profiles aligned with every configured WAN.
+# netifd invokes this hook after a WAN is added, removed, renewed or loses link.
+
+case "${ACTION:-}" in
+	ifup|ifdown|ifupdate) ;;
+	*) exit 0 ;;
+esac
+
+case "${INTERFACE:-}" in
+	wan|wan[0-9]*) ;;
+	*) exit 0 ;;
+esac
+
+[ "$(uci -q get "network.${INTERFACE}" 2>/dev/null)" = "interface" ] || exit 0
+
+(
+	sleep 2
+	lock_dir="/tmp/proxyos-remote-hotplug.lock"
+	if ! mkdir "$lock_dir" 2>/dev/null; then
+		exit 0
+	fi
+	trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT INT TERM
+
+	controller="/usr/libexec/proxyos/proxyosctl"
+	[ -x "$controller" ] || exit 0
+	rm -f "/tmp/proxyos-remote-public-${INTERFACE}"
+	"$controller" remote-access >/dev/null 2>&1 || {
+		logger -t proxyos-remote "failed to refresh ${INTERFACE} remote profile after ${ACTION}"
+		exit 0
+	}
+
+	# Credentials must become active without opening the web console. Rebuild only
+	# when the service is enabled; disabled installations still pre-create stable
+	# credentials for the next explicit enable operation.
+	if [ "$(jq -r '.enabled // false' /etc/proxyos/remote-access.json 2>/dev/null)" = "true" ]; then
+		if "$controller" apply '{}' >/dev/null 2>&1; then
+			logger -t proxyos-remote "refreshed ${INTERFACE} remote profile after ${ACTION}"
+		else
+			logger -t proxyos-remote "failed to apply ${INTERFACE} remote profile after ${ACTION}"
+		fi
+	fi
+) &
+
+exit 0

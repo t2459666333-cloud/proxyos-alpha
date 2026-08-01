@@ -8,6 +8,10 @@ const required = [
   "README.md",
   "scripts/build-image.sh",
   "rootfs/etc/init.d/proxyos",
+  "rootfs/etc/init.d/tailscaled",
+  "rootfs/etc/hotplug.d/iface/95-proxyos-remote-access",
+  "rootfs/etc/proxyos/remote-access.json",
+  "rootfs/etc/proxyos/tunnel.json",
   "rootfs/etc/uci-defaults/99-proxyos",
   "rootfs/usr/libexec/proxyos/proxyosctl",
   "rootfs/usr/libexec/rpcd/proxyos",
@@ -45,6 +49,9 @@ for (const expected of [
   "kmod-tun",
   "uhttpd-mod-ubus",
   "sha256sum --check",
+  "TAILSCALE_VERSION",
+  "52490ce0832b245857e2afef7426d6ae5a4b49fb391412833cc95729bd23f7de",
+  "tailscaled",
   'PROXYOS_VERSION="$(tr -d',
 ]) {
   if (!buildScript.includes(expected)) {
@@ -118,6 +125,7 @@ if (!firstBoot.includes("wifi config") || !firstBoot.includes(".disabled=1")) {
 const indexHtml = await readFile(path.join(root, "rootfs/www/index.html"), "utf8");
 const appScript = await readFile(path.join(root, "rootfs/www/assets/app.js"), "utf8");
 const appStyles = await readFile(path.join(root, "rootfs/www/assets/app.css"), "utf8");
+const proxyAcl = await readFile(path.join(root, "rootfs/usr/share/rpcd/acl.d/proxyos.json"), "utf8");
 for (const requiredId of [
   "node-subscription-filter",
   "subscription-detail-modal",
@@ -145,9 +153,39 @@ for (const requiredBehavior of [
   "download_mbps",
   "packet_loss_percent",
   "stability_score",
+  "remote_access",
+  "remote_access_apply",
+  "remote_access_rotate",
+  "tunnel_status",
+  "tunnel_connect",
+  "tunnel_logout",
 ]) {
   if (!appScript.includes(requiredBehavior)) {
     throw new Error(`ProxyOS UI is missing required behavior: ${requiredBehavior}`);
+  }
+}
+for (const rpcMethod of [
+  "remote_access",
+  "remote_access_apply",
+  "remote_access_rotate",
+  "tunnel_status",
+  "tunnel_connect",
+  "tunnel_logout",
+]) {
+  if (!proxyAcl.includes(`\"${rpcMethod}\"`)) {
+    throw new Error(`ProxyOS RPC ACL is missing method: ${rpcMethod}`);
+  }
+}
+for (const tunnelSafety of [
+  "--accept-dns=false",
+  "--accept-routes=false",
+  "--advertise-exit-node=false",
+  "--netfilter-mode=off",
+  "proxyos_tunnel_remote",
+  'process_name:["tailscaled"]',
+]) {
+  if (!controller.includes(tunnelSafety)) {
+    throw new Error(`Controller is missing tunnel isolation behavior: ${tunnelSafety}`);
   }
 }
 if (!appScript.includes(version)) {

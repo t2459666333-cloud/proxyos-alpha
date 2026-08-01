@@ -64,7 +64,6 @@ if [ "$port_count" -ge 2 ]; then
 else
 	only_port="$(printf '%s\n' "$ports" | sed -n '1p')"
 	uci -q batch <<-EOF
-		delete network.wan
 		set network.br_lan='device'
 		set network.br_lan.name='br-lan'
 		set network.br_lan.type='bridge'
@@ -75,7 +74,13 @@ else
 		set network.lan.ipaddr='192.168.10.1'
 		set network.lan.netmask='255.255.255.0'
 	EOF
-	[ -z "$only_port" ] || uci add_list "network.br_lan.ports=${only_port}"
+	if [ -n "$only_port" ]; then
+		uci set network.wan='interface'
+		uci set network.wan.proto='dhcp'
+		uci set "network.wan.device=${only_port}"
+	else
+		uci -q delete network.wan
+	fi
 fi
 uci commit network
 
