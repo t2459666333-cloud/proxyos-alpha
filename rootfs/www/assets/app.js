@@ -1,4 +1,5 @@
 const ZERO_SESSION = "00000000000000000000000000000000";
+const SESSION_STORAGE_KEY = "proxyos_session_rc7_1";
 
 class SessionExpiredError extends Error {
   constructor() {
@@ -9,7 +10,7 @@ class SessionExpiredError extends Error {
 }
 
 const state = {
-  session: sessionStorage.getItem("proxyos_session") || "",
+  session: sessionStorage.getItem(SESSION_STORAGE_KEY) || "",
   credentials: null,
   reauthPromise: null,
   page: "dashboard",
@@ -50,6 +51,8 @@ const iconPaths = {
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/>',
   folder: '<path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
   wifi: '<path d="M4.9 9.1a10 10 0 0 1 14.2 0M2 6.2a14 14 0 0 1 20 0M8 12.2a5.7 5.7 0 0 1 8 0"/><circle cx="12" cy="17" r="1"/>',
+  accessPoint: '<path d="M12 13v8M8 21h8"/><circle cx="12" cy="10" r="2"/><path d="M7.8 5.8a6 6 0 0 0 0 8.4M16.2 5.8a6 6 0 0 1 0 8.4M4.8 2.8a10.2 10.2 0 0 0 0 14.4M19.2 2.8a10.2 10.2 0 0 1 0 14.4"/>',
+  router: '<rect x="3" y="9" width="18" height="10" rx="2"/><path d="M7 9V4M17 9V4M5 4h4M15 4h4"/><circle cx="8" cy="14" r="1"/><circle cx="12" cy="14" r="1"/><path d="M16 14h2"/>',
   shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="M12 8v4M12 16h.01"/>',
   network: '<rect x="9" y="2" width="6" height="5" rx="1"/><rect x="2" y="17" width="6" height="5" rx="1"/><rect x="16" y="17" width="6" height="5" rx="1"/><path d="M12 7v5M5 17v-3h14v3"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.55V21h-4v-.08A1.7 1.7 0 0 0 8.95 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1.03H3v-4h.08A1.7 1.7 0 0 0 4.6 8.95a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15.05 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06L19.82 7l-.06.06A1.7 1.7 0 0 0 19.4 9c.63.25 1.04.85 1.04 1.52V10.6H21v4h-.56A1.7 1.7 0 0 0 19.4 15Z"/>',
@@ -129,7 +132,7 @@ async function reauthenticate() {
     );
     if (!result.ubus_rpc_session) throw new SessionExpiredError();
     state.session = result.ubus_rpc_session;
-    sessionStorage.setItem("proxyos_session", state.session);
+    sessionStorage.setItem(SESSION_STORAGE_KEY, state.session);
     return state.session;
   })();
   state.reauthPromise = active;
@@ -192,7 +195,7 @@ async function login(username, password) {
   if (!result.ubus_rpc_session) throw new Error("未获得登录会话");
   state.credentials = { username, password };
   state.session = result.ubus_rpc_session;
-  sessionStorage.setItem("proxyos_session", state.session);
+  sessionStorage.setItem(SESSION_STORAGE_KEY, state.session);
   $("#login-screen").classList.add("is-hidden");
   $("#app-shell").classList.remove("is-hidden");
   await loadAll({ quiet: true });
@@ -204,7 +207,7 @@ function logout() {
   state.credentials = null;
   state.reauthPromise = null;
   state.loading = false;
-  sessionStorage.removeItem("proxyos_session");
+  sessionStorage.removeItem(SESSION_STORAGE_KEY);
   $("#app-shell").classList.add("is-hidden");
   $("#login-screen").classList.remove("is-hidden");
   $("#login-password").value = "";
@@ -237,7 +240,7 @@ async function loadAll({ quiet = false, full = true } = {}) {
         if (reason?.code === "SESSION_EXPIRED") {
           logout();
           if (!quiet) showToast(reason.message, true);
-          return;
+          return false;
         }
         results.push({ status: "rejected", reason });
       }
@@ -254,6 +257,7 @@ async function loadAll({ quiet = false, full = true } = {}) {
     renderAll();
     scheduleEgressChecks();
     if (!quiet) showToast(hadError ? "部分状态读取失败，系统将自动重试" : "状态已更新", hadError);
+    return !hadError;
   } finally {
     state.loading = false;
   }
@@ -263,7 +267,7 @@ function startRefreshLoop() {
   if (state.refreshTimer) return;
   state.refreshTimer = setInterval(() => {
     if (state.session && !document.hidden) loadAll({ quiet: true, full: false });
-  }, 30000);
+  }, 5000);
   document.addEventListener("visibilitychange", () => {
     if (state.session && !document.hidden) loadAll({ quiet: true, full: true });
   });
@@ -314,9 +318,40 @@ function groupedNodeOptions(selectedId = "", { includeEmpty = false, source = "a
   }
   return groups.join("") || `<option value="">没有可用节点</option>`;
 }
-function isWifiDevice(device) { return /wi.?fi|wireless|wlan/i.test(device.connection || device.type || ""); }
+function isWifiDevice(device) {
+  if (["wifi_external_ap", "wifi_external_router"].includes(device.connection)) return true;
+  if (["external_ap_device", "external_router_device", "router_downstream", "lan_bridge_downstream"].includes(device.connection)) return false;
+  return /wi.?fi|wireless|wlan/i.test(device.connection || device.type || "");
+}
+function isLocalWifiDevice(device) { return device.connection === "wifi"; }
+function isExternalWirelessClient(device) { return ["wifi_external_ap", "wifi_external_router"].includes(device.connection); }
+function isExternalApDevice(device) { return device.connection === "external_ap_device"; }
+function isRouterDownstreamDevice(device) { return ["external_router_device", "router_downstream"].includes(device.connection); }
+function isInfrastructureDevice(device) {
+  return isExternalApDevice(device) || device.connection === "external_router_device" || device.type === "access_point" || device.type === "router";
+}
+function clientDevices() { return state.devices.filter((device) => !isInfrastructureDevice(device)); }
+function isExternalAccessDevice(device) {
+  return isWifiDevice(device)
+    || isExternalApDevice(device)
+    || isRouterDownstreamDevice(device)
+    || device.connection === "lan_bridge_downstream";
+}
+function connectionLabel(device) {
+  if (isExternalApDevice(device)) return `AP 本体 · ${device.ap_port || "LAN"}`;
+  if (device.connection === "external_router_device") return `路由器本体 · ${device.ap_port || "LAN"}`;
+  if (device.connection === "wifi_external_ap") return `Wi‑Fi · 经由 AP（${device.ap_port || "LAN"}）`;
+  if (device.connection === "wifi_external_router") return `Wi‑Fi · 经由外接路由器（${device.ap_port || "LAN"}）`;
+  if (isRouterDownstreamDevice(device)) return `下级路由器 · ${device.ap_port || "LAN"}`;
+  if (device.connection === "lan_bridge_downstream") return `有线桥接下游 · ${device.ap_port || "LAN"}`;
+  if (device.type === "router") return `下级路由器 · ${device.ap_port || "LAN"}`;
+  if (isWifiDevice(device)) return device.band || "Wi‑Fi";
+  return "LAN";
+}
 function deviceIcon(device) {
   const text = `${device.name || ""} ${device.vendor || ""}`.toLowerCase();
+  if (device.connection === "external_ap_device" || device.type === "access_point") return "access-point";
+  if (device.connection === "external_router_device" || device.type === "router") return "router";
   if (/iphone|android|pixel|phone|手机/.test(text)) return "smartphone";
   if (/tv|电视/.test(text)) return "tv";
   if (/playstation|ps5|xbox|游戏/.test(text)) return "gamepad";
@@ -324,6 +359,11 @@ function deviceIcon(device) {
   return "monitor";
 }
 function platformFor(device) {
+  if (device.type === "access_point") return "无线接入点（AP）";
+  if (device.type === "router") return "下级路由器";
+  if (device.type === "phone") return "手机 / 移动设备";
+  if (device.type === "computer") return "电脑";
+  if (device.type === "external_client") return "外接 AP 客户端";
   const name = (device.name || "").toLowerCase();
   if (name.includes("iphone")) return "Apple / iOS";
   if (name.includes("mac")) return "Apple / macOS";
@@ -381,9 +421,10 @@ function policyLabel(policy) {
   return { fixed_node: "指定节点", auto_node: "自动节点组", direct: "直连", block: "禁止联网", system_default: "系统默认" }[policy] || "系统默认";
 }
 function deviceStatus(device) {
-  if (device.policy === "block") return ["blocked", "已阻断"];
+  if (device.policy === "block") return ["blocked", "禁止"];
+  if (!device.online) return ["offline", "离线"];
   if (device.policy === "direct") return ["direct", "直连"];
-  return device.online ? ["online", "在线"] : ["offline", "离线"];
+  return ["online", "在线"];
 }
 function latencyFor(device) { return nodeFor(device)?.latency_ms ?? null; }
 function latencyPairMarkup(node, includeSignal = false) {
@@ -441,15 +482,16 @@ function sparkPath(seed = 0) {
 }
 
 function renderMetricCards() {
-  const online = state.devices.filter((device) => device.online).length;
-  const proxied = state.devices.filter((device) => ["fixed_node", "auto_node"].includes(device.policy)).length;
+  const clients = clientDevices();
+  const online = clients.filter((device) => device.online).length;
+  const proxied = clients.filter((device) => device.online && ["fixed_node", "auto_node"].includes(device.policy)).length;
   const availableNodes = state.nodes.filter((node) => node.status !== "error").length;
-  const abnormal = state.devices.filter((device) => device.policy === "fixed_node" && !nodeFor(device)).length;
+  const abnormal = clients.filter((device) => device.policy === "fixed_node" && !nodeFor(device)).length;
   const metrics = [
-    { color: "blue", icon: "monitor", label: "在线设备", value: online, sub: `总设备 ${state.devices.length} 台` },
-    { color: "green", icon: "target", label: "代理设备", value: proxied, sub: `占比 ${state.devices.length ? ((proxied / state.devices.length) * 100).toFixed(1) : "0.0"}%` },
+    { color: "blue", icon: "monitor", label: "在线设备", value: online, sub: `终端总数 ${clients.length} 台` },
+    { color: "green", icon: "target", label: "代理设备", value: proxied, sub: `占比 ${clients.length ? ((proxied / clients.length) * 100).toFixed(1) : "0.0"}%` },
     { color: "violet", icon: "database", label: "可用节点", value: availableNodes, sub: `节点总数 ${state.nodes.length} 个` },
-    { color: "red", icon: "alert-shield", label: "异常设备", value: abnormal, sub: `占比 ${state.devices.length ? ((abnormal / state.devices.length) * 100).toFixed(1) : "0.0"}%` },
+    { color: "red", icon: "alert-shield", label: "异常设备", value: abnormal, sub: `占比 ${clients.length ? ((abnormal / clients.length) * 100).toFixed(1) : "0.0"}%` },
   ];
   $("#metric-grid").innerHTML = metrics.map((item, index) => `
     <article class="metric-card ${item.color}">
@@ -463,7 +505,7 @@ function deviceRow(device, dashboard = false) {
   const node = nodeFor(device);
   const [statusClass, statusLabel] = deviceStatus(device);
   const [countryCode] = countryFor(node);
-  const connection = isWifiDevice(device) ? "Wi‑Fi 5GHz" : "LAN";
+  const connection = connectionLabel(device);
   const protocol = device.policy === "direct" ? "DIRECT" : node?.protocol || (device.policy === "block" ? "Blocked" : "系统策略");
   if (dashboard) return `
     <tr>
@@ -496,9 +538,10 @@ function renderDashboard() {
   $("#dashboard-wifi").innerHTML = `
     <div class="wifi-strip-main"><span class="wifi-orb"><span class="icon" data-icon="wifi"></span></span><div class="wifi-strip-copy"><h2>Wi‑Fi ${wifi.available ? (wifi.enabled ? "已开启" : "已关闭") : "功能不可用"}</h2><p>${wifi.available ? `检测到无线网卡${wifi.driver ? ` · ${escapeHtml(wifi.driver)}` : ""}` : escapeHtml(wifi.reason || "未检测到支持 AP 模式的无线网卡")}</p></div></div>
     <button id="dashboard-wifi-toggle" class="button wifi-power" ${wifi.available ? "" : "disabled"}><span class="icon" data-icon="power"></span>${wifi.enabled ? "一键关闭 Wi‑Fi" : "一键开启 Wi‑Fi"}</button>`;
-  const onlineDevices = state.devices.filter((device) => device.online).slice(0, 5);
+  const allOnlineDevices = clientDevices().filter((device) => device.online);
+  const onlineDevices = allOnlineDevices.slice(0, 5);
   $("#dashboard-device-body").innerHTML = onlineDevices.length ? onlineDevices.map((device) => deviceRow(device, true)).join("") : `<tr><td colspan="7"><div class="empty-state">等待局域网设备获取地址</div></td></tr>`;
-  $("#dashboard-device-count").textContent = `共 ${state.devices.filter((device) => device.online).length} 台在线设备`;
+  $("#dashboard-device-count").textContent = `共 ${allOnlineDevices.length} 台在线设备`;
   $("#dashboard-wifi-toggle")?.addEventListener("click", toggleWifi);
   bindDynamicDeviceActions();
 }
@@ -631,18 +674,52 @@ function renderSubscriptions() {
   $$(".manage-subscription").forEach((button) => button.addEventListener("click", () => openSubscriptionDetails(button.dataset.id)));
 }
 
+function wifiClientRows() {
+  const devices = state.devices.filter(isExternalAccessDevice);
+  const accessMethod = (device) => {
+    if (isExternalApDevice(device)) return "外接 AP 本体";
+    if (device.connection === "external_router_device") return "外接路由器本体";
+    if (device.connection === "wifi_external_ap") return `经外接 AP${device.ap_port ? `（${device.ap_port}）` : ""}`;
+    if (device.connection === "wifi_external_router") return `经外接路由器${device.ap_port ? `（${device.ap_port}）` : ""}`;
+    if (device.connection === "lan_bridge_downstream") return `桥接下游${device.ap_port ? `（${device.ap_port}）` : ""}`;
+    if (isLocalWifiDevice(device)) return device.signal != null ? `本机无线 · ${device.signal} dBm` : "本机无线";
+    return "有线 LAN";
+  };
+  return devices.map((device) => {
+    const [statusClass, statusLabel] = deviceStatus(device);
+    return `<tr class="${device.online ? "" : "is-offline"}"><td><div class="device-cell"><span class="device-avatar"><span class="icon" data-icon="${deviceIcon(device)}"></span></span><div><strong>${escapeHtml(device.name || "未知设备")}</strong><small>${escapeHtml(device.mac || "")}</small></div></div></td><td><span class="access-method">${escapeHtml(accessMethod(device))}</span></td><td>${escapeHtml(connectionLabel(device))}</td><td>${escapeHtml(device.ip || "—")}</td><td>${escapeHtml(egressFor(device))}</td><td><span class="status-badge ${statusClass}">${statusLabel}</span></td><td><div class="table-actions"><button class="button button-soft edit-device" data-mac="${escapeHtml(device.mac)}">更换节点</button>${isLocalWifiDevice(device) && device.online ? `<button class="button danger-outline wifi-disconnect" data-mac="${escapeHtml(device.mac)}">断开连接</button>` : ""}</div></td></tr>`;
+  }).join("") || `<tr><td colspan="7"><div class="empty-state">没有检测到 AP 或下级路由器客户端</div></td></tr>`;
+}
+
+function wifiMetricCards() {
+  const clients = state.devices.filter((device) => isWifiDevice(device) && !isExternalApDevice(device) && !isRouterDownstreamDevice(device));
+  const online = clients.filter((device) => device.online).length;
+  const proxied = clients.filter((device) => device.online && ["fixed_node", "auto_node"].includes(device.policy)).length;
+  const infrastructure = state.devices.filter((device) => isExternalApDevice(device) || isRouterDownstreamDevice(device)).length;
+  const abnormal = clients.filter((device) => device.policy === "block" || (device.policy === "fixed_node" && !nodeFor(device))).length;
+  const cards = [
+    { color: "blue", icon: "monitor", label: "在线无线终端", value: online, sub: `共识别 ${clients.length} 台终端` },
+    { color: "green", icon: "target", label: "使用代理", value: proxied, sub: `占无线终端 ${clients.length ? ((proxied / clients.length) * 100).toFixed(1) : "0.0"}%` },
+    { color: "violet", icon: "network", label: "接入点 / 路由器", value: infrastructure, sub: "AP 与下级路由器本体" },
+    { color: "red", icon: "alert-shield", label: "异常或已禁止", value: abnormal, sub: "需检查策略或节点" },
+  ];
+  return `<div class="metric-grid wifi-metric-grid">${cards.map((item) => `<article class="metric-card ${item.color}"><div class="metric-main"><span class="metric-icon"><span class="icon" data-icon="${item.icon}"></span></span><div class="metric-copy"><span>${item.label}</span><strong>${item.value}</strong></div></div><div class="metric-sub">${item.sub}</div></article>`).join("")}</div>`;
+}
+
 function renderWifi() {
   const wifi = state.wifi || {};
   if (!wifi.available) {
-    $("#wifi-content").innerHTML = `<article class="panel wifi-unavailable"><span class="wifi-orb"><span class="icon" data-icon="wifi"></span></span><h2>Wi‑Fi 功能不可用</h2><p>${escapeHtml(wifi.reason || "未检测到支持 AP 模式的无线网卡。")} 通过外部 AP 接入的设备仍可在设备页面单独分配代理节点，但本机无法控制外部 AP 的无线开关。</p><button class="button button-ghost" disabled>一键开关不可用</button></article>`;
+    $("#wifi-content").innerHTML = `${wifiMetricCards()}<article class="panel wifi-unavailable"><span class="wifi-orb"><span class="icon" data-icon="wifi"></span></span><h2>使用外接 AP / 下级路由器</h2><p>系统会将 AP/路由器本体与其无线终端分开显示，并允许逐台分配节点。无线参数仍由下级设备自身管理。</p></article><article class="panel wifi-clients"><div class="panel-head"><h2>外部接入设备</h2><button id="wifi-refresh" class="button button-ghost"><span class="icon" data-icon="refresh"></span>刷新</button></div><div class="table-wrap"><table class="data-table wifi-client-table"><thead><tr><th>设备名称</th><th>接入类型</th><th>连接路径</th><th>IP 地址</th><th>分配节点</th><th>状态</th><th>操作</th></tr></thead><tbody>${wifiClientRows()}</tbody></table></div></article>`;
     hydrateIcons();
+    $("#wifi-refresh")?.addEventListener("click", () => loadAll());
+    bindDynamicDeviceActions();
     return;
   }
   const bands = state.wifiConfig?.bands || [];
   const band24 = bands.find((band) => String(band.band).startsWith("2")) || {};
   const band5 = bands.find((band) => String(band.band).startsWith("5")) || {};
   const driver = escapeHtml(wifi.driver || wifi.phy || "无线网卡");
-  $("#wifi-content").innerHTML = `
+  $("#wifi-content").innerHTML = `${wifiMetricCards()}
     <article class="wifi-strip wifi-page-hero"><div class="wifi-strip-main"><span class="wifi-orb"><span class="icon" data-icon="wifi"></span></span><div class="wifi-strip-copy"><h2>Wi‑Fi ${wifi.enabled ? "已开启" : "已关闭"} <span class="enabled-pill">${wifi.enabled ? "正常" : "已停用"}</span></h2><p>检测到无线网卡 · ${driver}</p></div></div><button id="wifi-toggle" class="button wifi-power"><span class="icon" data-icon="power"></span>${wifi.enabled ? "一键关闭 Wi‑Fi" : "一键开启 Wi‑Fi"}</button></article>
     <div class="wifi-band-grid">
       ${wifiBandCard("2.4GHz 网络", band24, wifi.enabled)}
@@ -660,7 +737,7 @@ function renderWifi() {
       <label class="wifi-field"><span>Wi‑Fi 国家/地区</span><select id="wifi-country"><option value="CN">中国 (CN)</option><option value="US">美国 (US)</option><option value="JP">日本 (JP)</option><option value="SG">新加坡 (SG)</option></select></label>
       <div class="wifi-field"><span>访客 Wi‑Fi</span><div class="switch-line"><label class="toggle-switch"><input id="wifi-guest" type="checkbox" ${state.wifiConfig?.guest_enabled ? "checked" : ""} /><i></i></label><span>启用独立网段与客户端隔离</span></div></div>
     </form></article>
-    <article class="panel wifi-clients"><div class="panel-head"><h2>已连接的无线设备</h2><button id="wifi-refresh" class="button button-ghost"><span class="icon" data-icon="refresh"></span>刷新</button></div><div class="table-wrap"><table class="data-table wifi-client-table"><thead><tr><th>设备名称</th><th>信号强度</th><th>频段</th><th>IP 地址</th><th>分配节点</th><th>状态</th><th>操作</th></tr></thead><tbody>${state.devices.filter(isWifiDevice).map((device) => `<tr><td><div class="device-cell"><span class="device-avatar"><span class="icon" data-icon="${deviceIcon(device)}"></span></span><strong>${escapeHtml(device.name || "未知设备")}</strong></div></td><td><span class="latency">${device.signal != null ? `${device.signal} dBm` : "— dBm"}</span></td><td>${escapeHtml(device.band || "Wi‑Fi")}</td><td>${escapeHtml(device.ip || "—")}</td><td>${escapeHtml(egressFor(device))}</td><td><span class="status-badge online">在线</span></td><td><button class="button danger-outline wifi-disconnect" data-mac="${escapeHtml(device.mac)}">断开连接</button></td></tr>`).join("") || `<tr><td colspan="7"><div class="empty-state">没有检测到无线客户端</div></td></tr>`}</tbody></table></div></article>`;
+    <article class="panel wifi-clients"><div class="panel-head"><h2>已连接的无线设备</h2><button id="wifi-refresh" class="button button-ghost"><span class="icon" data-icon="refresh"></span>刷新</button></div><div class="table-wrap"><table class="data-table wifi-client-table"><thead><tr><th>设备名称</th><th>接入类型</th><th>连接路径</th><th>IP 地址</th><th>分配节点</th><th>状态</th><th>操作</th></tr></thead><tbody>${wifiClientRows()}</tbody></table></div></article>`;
   hydrateIcons();
   $("#wifi-toggle")?.addEventListener("click", toggleWifi);
   $("#wifi-settings-form")?.addEventListener("submit", saveWifiSettings);
@@ -670,11 +747,13 @@ function renderWifi() {
     input.type = input.type === "password" ? "text" : "password";
   });
   $$(".wifi-disconnect").forEach((button) => button.addEventListener("click", () => disconnectWifiClient(button.dataset.mac)));
+  bindDynamicDeviceActions();
 }
 
 function wifiBandCard(title, band, enabled) {
   const active = enabled && band.enabled !== false;
-  return `<article class="panel wifi-band-card"><div class="wifi-band-head"><span class="wifi-band-icon"><span class="icon" data-icon="wifi"></span></span><div class="wifi-band-content"><div class="wifi-band-title"><h2>${title}</h2><span class="enabled-pill">${active ? "已启用" : "已停用"}</span></div><dl class="wifi-facts"><div><dt>SSID</dt><dd>${escapeHtml(band.ssid || "未配置")}</dd></div><div><dt>安全模式</dt><dd>${escapeHtml(band.encryption || "WPA2/WPA3-Personal")}</dd></div><div><dt>信道</dt><dd>${escapeHtml(band.channel || "自动")}</dd></div><div><dt>信道宽度</dt><dd>${escapeHtml(band.htmode || "自动")}</dd></div><div><dt>已连接设备</dt><dd>${state.devices.filter(isWifiDevice).length} 台</dd></div><div><dt>状态</dt><dd><span class="enabled-pill">${active ? "正常" : "已停用"}</span></dd></div></dl></div></div></article>`;
+  const onlineWifiClients = state.devices.filter((device) => isWifiDevice(device) && device.online && !isInfrastructureDevice(device)).length;
+  return `<article class="panel wifi-band-card"><div class="wifi-band-head"><span class="wifi-band-icon"><span class="icon" data-icon="wifi"></span></span><div class="wifi-band-content"><div class="wifi-band-title"><h2>${title}</h2><span class="enabled-pill">${active ? "已启用" : "已停用"}</span></div><dl class="wifi-facts"><div><dt>SSID</dt><dd>${escapeHtml(band.ssid || "未配置")}</dd></div><div><dt>安全模式</dt><dd>${escapeHtml(band.encryption || "WPA2/WPA3-Personal")}</dd></div><div><dt>信道</dt><dd>${escapeHtml(band.channel || "自动")}</dd></div><div><dt>信道宽度</dt><dd>${escapeHtml(band.htmode || "自动")}</dd></div><div><dt>在线无线终端</dt><dd>${onlineWifiClients} 台</dd></div><div><dt>状态</dt><dd><span class="enabled-pill">${active ? "正常" : "已停用"}</span></dd></div></dl></div></div></article>`;
 }
 
 function renderPorts() {
@@ -706,13 +785,13 @@ function renderPolicies() {
 
 function renderSystem() {
   const healthy = Boolean(state.status.singbox_running);
-  $("#system-version").textContent = state.status.version || "0.3.0-rc6";
+  $("#system-version").textContent = state.status.version || "0.3.0-rc7";
   $("#system-model").textContent = state.status.model || "x86-64";
   $("#system-kernel").textContent = state.status.kernel || "—";
   $("#system-core").textContent = healthy ? "运行正常" : "未运行";
   $("#sidebar-core-text").textContent = healthy ? "系统运行正常" : "代理核心异常";
   $("#sidebar-uptime").textContent = formatUptime(state.status.uptime);
-  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc6";
+  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc7";
   $("#sidebar-kernel").textContent = state.status.kernel || "—";
   ["#global-health", "#system-health-pill"].forEach((selector) => {
     const pill = $(selector);
@@ -769,9 +848,14 @@ function openDeviceDrawer(mac) {
   if (!device) return;
   state.selectedDevice = device;
   $("#drawer-device-name").textContent = device.name || "未知设备";
+  $("#drawer-device-name-input").value = device.name || "";
   $("#drawer-device-platform").textContent = platformFor(device);
   $("#drawer-device-line").textContent = `${device.ip || "—"} · ${isWifiDevice(device) ? "Wi‑Fi" : "LAN"}`;
   $(".drawer-device-title .device-avatar").innerHTML = `<span class="icon" data-icon="${deviceIcon(device)}"></span>`;
+  const [drawerStatusClass, drawerStatusLabel] = deviceStatus(device);
+  const drawerStatus = $(".drawer-device-title .status-badge");
+  drawerStatus.className = `status-badge ${drawerStatusClass}`;
+  drawerStatus.textContent = drawerStatusLabel;
   const policy = device.policy || "system_default";
   const radio = $(`#device-policy-form input[value="${policy}"]`);
   if (radio) radio.checked = true;
@@ -789,7 +873,7 @@ function openDeviceDrawer(mac) {
   };
   const failureLabels = { block: "保持断网", backup: "切换备用节点", direct: "切换直连" };
   $("#drawer-info-connection").textContent = isWifiDevice(device) ? (device.band || "Wi‑Fi") : "有线 LAN";
-  $("#drawer-info-status").textContent = device.online === false ? "当前离线" : "连接正常";
+  $("#drawer-info-status").textContent = device.policy === "block" ? "已禁止联网" : (device.online === false ? "当前离线" : "连接正常");
   $("#drawer-info-ip").textContent = device.ip || "—";
   $("#drawer-info-mac").textContent = device.mac || "—";
   $("#drawer-info-platform").textContent = platformFor(device);
@@ -835,6 +919,8 @@ async function saveDevicePolicy(event) {
   const backupNodeId = $("#drawer-backup-select").value;
   const failureMode = $("#drawer-failure-mode").value;
   const autoSource = $("#device-drawer .tab-group button.is-active")?.dataset.value || "all";
+  const deviceName = $("#drawer-device-name-input").value.trim();
+  if (!deviceName) return showToast("请填写便于识别的设备名称", true);
   if (policy === "fixed_node" && !nodeId) return showToast("请先添加并选择一个节点", true);
   if (policy === "auto_node" && !state.nodes.length) return showToast("自动节点组中没有可用节点", true);
   const button = event.submitter;
@@ -844,7 +930,8 @@ async function saveDevicePolicy(event) {
     await api("device_bind", {
       mac: device.mac,
       ip: device.ip,
-      name: device.name || "Unknown device",
+      name: deviceName,
+      custom_name: true,
       policy,
       node_id: policy === "fixed_node" ? nodeId : "",
       backup_node_id: backupNodeId,
@@ -1302,7 +1389,7 @@ async function batchBlock() {
   if (!devices.length) return showToast("请先选择设备", true);
   if (!window.confirm(`确认禁止 ${devices.length} 台设备联网？`)) return;
   try {
-    for (const device of devices) await api("device_bind", { mac: device.mac, ip: device.ip, name: device.name || "Unknown device", policy: "block", node_id: "" });
+    for (const device of devices) await api("device_bind", { mac: device.mac, ip: device.ip, name: device.name || "Unknown device", custom_name: Boolean(device.custom_name), policy: "block", node_id: "" });
     state.selectedDevices.clear(); await loadAll({ quiet: true }); showToast("所选设备已禁止联网");
   } catch (error) { showToast(error.message, true); }
 }
@@ -1315,7 +1402,7 @@ async function batchChangeNode() {
   const node = state.nodes[selected];
   if (!node) return;
   try {
-    for (const device of devices) await api("device_bind", { mac: device.mac, ip: device.ip, name: device.name || "Unknown device", policy: "fixed_node", node_id: node.id });
+    for (const device of devices) await api("device_bind", { mac: device.mac, ip: device.ip, name: device.name || "Unknown device", custom_name: Boolean(device.custom_name), policy: "fixed_node", node_id: node.id });
     state.selectedDevices.clear(); await loadAll({ quiet: true }); showToast(`${devices.length} 台设备已切换到 ${node.name}`);
   } catch (error) { showToast(error.message, true); }
 }
@@ -1488,7 +1575,16 @@ async function bootstrap() {
   if (!state.session) return;
   $("#login-screen").classList.add("is-hidden");
   $("#app-shell").classList.remove("is-hidden");
-  try { await loadAll({ quiet: true }); } catch { logout(); }
+  try {
+    const loaded = await loadAll({ quiet: true });
+    if (!loaded) {
+      logout();
+      return;
+    }
+  } catch {
+    logout();
+    return;
+  }
   startRefreshLoop();
 }
 

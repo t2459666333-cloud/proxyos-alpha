@@ -1,4 +1,4 @@
-# ProxyOS 0.3.0 RC6
+# ProxyOS 0.3.0 RC7
 
 ProxyOS is an x86-64 OpenWrt derivative focused on one job: assigning an
 independent sing-box outbound to every LAN or Wi-Fi client.
@@ -6,12 +6,19 @@ independent sing-box outbound to every LAN or Wi-Fi client.
 This repository contains a reproducible OpenWrt ImageBuilder project. It does
 not contain a renamed stock image or a placeholder firmware file.
 
-## 0.3.0 RC6 scope
+## 0.3.0 RC7 scope
 
 - OpenWrt 25.12.5 x86-64, UEFI and legacy BIOS images
 - A custom responsive Web console
 - OpenWrt `rpcd`/`ubus` authentication
 - Device discovery from DHCP leases and the neighbour table
+- Fast two-second LAN presence tracking with FDB activity, five-second UI
+  refresh, immediate offline display, and automatic hiding of profiles that
+  have not returned for seven days
+- External AP/router topology classification: infrastructure devices and their
+  downstream clients are shown separately, with per-client proxy assignment
+- One consistent online-state model across Overview, Devices, and Wi-Fi;
+  infrastructure devices are excluded from client totals
 - Per-device policies: fixed node, automatic node, direct, block, or system default
 - Per-device backup node and block/direct/backup failure behavior
 - Manual sing-box outbound import (all protocols supported by the installed
@@ -33,9 +40,17 @@ not contain a renamed stock image or a placeholder firmware file.
   and stale probe files are removed automatically.
 - Wi-Fi/AP capability detection, radio toggle, radio settings, client disconnect,
   and an isolated guest network
+- A dedicated external AP/router management view when no local AP-capable radio
+  is present
 - Physical port inventory and WAN/LAN assignment with a 90-second rollback
+- Portable first-boot port detection that excludes bridges, virtual adapters,
+  TUN interfaces, and wireless devices before probing an upstream DHCP port
+- A boot-time platform doctor and read-only `proxyos-selftest` covering WAN,
+  LAN bridge, DNS, subscription parser, required tools, and device discovery
 - Safe configuration validation before sing-box restart
 - Reference-matched overview, device, node, and Wi-Fi management screens
+- Unified Chinese typography, tabular network numbers, consistent line icons,
+  country flags, AP/router glyphs, and responsive state badges
 - Real proxy-path latency and egress-IP checks with multi-endpoint fallback
 - Direct bootstrap DNS for proxy server hostnames, preventing recursive
   node-resolution failures after a device is assigned to a node
@@ -51,6 +66,8 @@ not contain a renamed stock image or a placeholder firmware file.
 - A 24-hour Web session, automatic in-memory session renewal, reduced background
   polling, and automatic refresh when the browser tab becomes active again
 - Configuration backup/restore, password changes, logs, and controlled reboot
+- Device block policies are enforced by an isolated nftables table and are
+  restored at service startup
 - Update checks that degrade gracefully when no public release channel has
   been configured yet
 

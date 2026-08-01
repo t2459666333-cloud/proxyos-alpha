@@ -1,0 +1,25 @@
+#!/bin/sh
+
+/usr/sbin/proxyos-platform-doctor >/dev/null 2>&1 || true
+platform="$(cat /tmp/proxyos/platform-health.json 2>/dev/null || printf '{}')"
+wan="$(uci -q get network.wan.device)"
+lan_ports="$(uci -q get network.br_lan.ports)"
+wan_carrier=false
+[ -n "$wan" ] && [ "$(cat "/sys/class/net/$wan/carrier" 2>/dev/null)" = "1" ] && wan_carrier=true
+lan_bridge=false
+[ -d /sys/class/net/br-lan ] && lan_bridge=true
+public_ip="$(curl -4 --fail --silent --show-error --location --connect-timeout 4 --max-time 10 https://api.ip.sb/ip 2>/dev/null | tr -d '\r\n[:space:]')"
+printf '%s' "$public_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || public_ip=""
+subscription_parser=false
+if python3 -c 'import yaml' >/dev/null 2>&1 && [ -r /usr/libexec/proxyos/subscription_parser.py ]; then
+	subscription_parser=true
+fi
+device_count="$(/usr/libexec/proxyos/proxyosctl devices 2>/dev/null | jq '.items | length' 2>/dev/null || printf '0')"
+case "$device_count" in ''|*[!0-9]*) device_count=0 ;; esac
+
+jq -n --argjson platform "$platform" --arg wan "$wan" --arg lan "$lan_ports" \
+	--argjson carrier "$wan_carrier" --argjson bridge "$lan_bridge" \
+	--arg public_ip "$public_ip" --argjson parser "$subscription_parser" \
+	--argjson devices "$device_count" \
+	'{platform:$platform,network:{wan:$wan,wan_carrier:$carrier,lan_ports:($lan|split(" ")|map(select(length>0))),lan_bridge:$bridge},subscription_parser_ok:$parser,direct_public_ip:$public_ip,detected_devices:$devices}'
+

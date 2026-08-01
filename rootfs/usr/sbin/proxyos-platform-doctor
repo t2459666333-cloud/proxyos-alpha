@@ -1,0 +1,72 @@
+#!/bin/sh
+
+TAG="proxyos-platform-doctor"
+STATE_DIR="/tmp/proxyos"
+REPORT="$STATE_DIR/platform-health.json"
+
+log() { logger -t "$TAG" "$*"; }
+
+safe_hostname() {
+	value="$(printf '%s' "$1" | tr ' _' '--' | sed 's/[^A-Za-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//' | cut -c 1-63)"
+	[ -n "$value" ] || value="device"
+	printf '%s\n' "$value"
+}
+
+repair_dhcp_names() {
+	changed=0
+	for section in $(uci show dhcp 2>/dev/null | sed -n "s/^\(dhcp\.[^.]*\)=host$/\1/p"); do
+		name="$(uci -q get "${section}.name")"
+		[ -n "$name" ] || continue
+		safe="$(safe_hostname "$name")"
+		[ "$safe" = "$name" ] && continue
+		uci set "${section}.name=${safe}"
+		changed=1
+		log "sanitized DHCP hostname '$name' to '$safe'"
+	done
+	[ "$changed" -eq 0 ] || uci commit dhcp
+}
+
+service_running() {
+	ubus call service list "{\"name\":\"$1\"}" 2>/dev/null | \
+		jsonfilter -e '@.*.instances.*.running' 2>/dev/null | grep -qx true
+}
+
+main() {
+	mkdir -p "$STATE_DIR"
+	repair_dhcp_names
+	service_running dnsmasq || /etc/init.d/dnsmasq restart >/dev/null 2>&1
+
+	missing=""
+	for command in jq curl sing-box uci ubus jsonfilter ip; do
+		command -v "$command" >/dev/null 2>&1 || missing="$missing $command"
+	done
+	command -v python3 >/dev/null 2>&1 || missing="$missing python3"
+	[ -e /dev/net/tun ] || missing="$missing /dev/net/tun"
+
+	dns_ok=false
+	if nslookup openai.com 127.0.0.1 >/dev/null 2>&1; then dns_ok=true; fi
+	route_ok=false
+	if ip route show default 2>/dev/null | grep -q '^default '; then route_ok=true; fi
+	dnsmasq_ok=false
+	if service_running dnsmasq; then dnsmasq_ok=true; fi
+	python_yaml_ok=false
+	if python3 -c 'import yaml' >/dev/null 2>&1; then python_yaml_ok=true; fi
+	ready=false
+	if [ -z "$missing" ] && [ "$dns_ok" = true ] && [ "$route_ok" = true ] && \
+		[ "$dnsmasq_ok" = true ] && [ "$python_yaml_ok" = true ]; then ready=true; fi
+
+	missing="${missing# }"
+	jq -n --argjson ready "$ready" --argjson dns "$dns_ok" \
+		--argjson route "$route_ok" --argjson dnsmasq "$dnsmasq_ok" \
+		--argjson yaml "$python_yaml_ok" --arg missing "$missing" \
+		'{ready:$ready,dns_ok:$dns,default_route_ok:$route,dnsmasq_running:$dnsmasq,python_yaml_ok:$yaml,missing:$missing}' \
+		> "$REPORT"
+	[ "$ready" = true ] || {
+		log "platform check failed: $(cat "$REPORT")"
+		return 1
+	}
+	log "platform check passed"
+}
+
+main "$@"
+

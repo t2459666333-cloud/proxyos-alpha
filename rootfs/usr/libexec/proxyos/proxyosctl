@@ -4,6 +4,8 @@ set -eu
 STATE_DIR="${PROXYOS_STATE_DIR:-/etc/proxyos}"
 NODES_FILE="${STATE_DIR}/nodes.json"
 DEVICES_FILE="${STATE_DIR}/devices.json"
+PRESENCE_STATE_FILE="${STATE_DIR}/device-presence.json"
+PRESENCE_FILE="/tmp/proxyos/device-presence.json"
 SUBSCRIPTIONS_FILE="${STATE_DIR}/subscriptions.json"
 TEMPLATE_FILE="${STATE_DIR}/config-template.json"
 ACTIVE_CONFIG="${STATE_DIR}/sing-box.json"
@@ -16,7 +18,7 @@ PORT_ROLLBACK_CONFIG="/tmp/proxyos-network.rollback"
 VERSION_FILE="${STATE_DIR}/version"
 
 proxyos_version() {
-	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc6'
+	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc7'
 }
 
 json_error() {
@@ -37,21 +39,94 @@ require_commands() {
 	done
 }
 
+platform_preflight() {
+	feature="$1"
+	[ ! -x /usr/sbin/proxyos-platform-doctor ] || \
+		/usr/sbin/proxyos-platform-doctor >/dev/null 2>&1 || true
+	command -v curl >/dev/null 2>&1 || json_error "固件缺少 curl，无法执行网络请求"
+	ip route show default 2>/dev/null | grep -q '^default ' ||
+		json_error "WAN 尚未获得默认路由，请检查自动识别结果和上游网络"
+	if ! nslookup api.ipify.org 127.0.0.1 >/dev/null 2>&1; then
+		json_error "DNS 服务不可用；请检查 dnsmasq 状态或非法 DHCP 主机名"
+	fi
+	case "$feature" in
+		subscription)
+			command -v "$PYTHON" >/dev/null 2>&1 || json_error "固件缺少 python3，无法解析订阅"
+			"$PYTHON" -c 'import yaml' >/dev/null 2>&1 || json_error "固件缺少 python3-yaml，无法解析 Clash YAML 订阅"
+			[ -r "$PARSER" ] || json_error "订阅解析器未安装"
+			;;
+		egress)
+			command -v "$SINGBOX" >/dev/null 2>&1 || json_error "固件缺少 sing-box，无法检测代理出口"
+			[ -e /dev/net/tun ] || json_error "当前内核缺少 TUN 支持"
+			;;
+	esac
+}
+
+dhcp_safe_name() {
+	safe_name="$(printf '%s' "$1" | tr ' _' '--' |
+		sed 's/[^A-Za-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//' | cut -c 1-63)"
+	[ -n "$safe_name" ] || safe_name="device"
+	printf '%s\n' "$safe_name"
+}
+
+sync_block_firewall() {
+	[ "${PROXYOS_SKIP_FIREWALL:-0}" = "1" ] && return 0
+	command -v nft >/dev/null 2>&1 || return 1
+	block_nft="/tmp/proxyos-block.$$.nft"
+	blocked_ips=""
+	for block_ip in $(jq -r '.[] | select(.policy == "block") | .ip // empty' "$DEVICES_FILE"); do
+		printf '%s' "$block_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || continue
+		case ",${blocked_ips}," in *",${block_ip},"*) continue ;; esac
+		if [ -n "$blocked_ips" ]; then blocked_ips="${blocked_ips}, ${block_ip}"; else blocked_ips="$block_ip"; fi
+	done
+	blocked_macs=""
+	for block_mac in $(jq -r '.[] | select(.policy == "block") | (.mac // empty | ascii_downcase)' "$DEVICES_FILE"); do
+		printf '%s' "$block_mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || continue
+		case ",${blocked_macs}," in *",${block_mac},"*) continue ;; esac
+		if [ -n "$blocked_macs" ]; then blocked_macs="${blocked_macs}, ${block_mac}"; else blocked_macs="$block_mac"; fi
+	done
+	{
+		printf 'table inet proxyos_block {\n'
+		printf ' set blocked_ipv4 { type ipv4_addr; flags interval;'
+		[ -z "$blocked_ips" ] || printf ' elements = { %s };' "$blocked_ips"
+		printf ' }\n'
+		printf ' set blocked_mac { type ether_addr;'
+		[ -z "$blocked_macs" ] || printf ' elements = { %s };' "$blocked_macs"
+		printf ' }\n'
+		printf ' chain forward { type filter hook forward priority -5; policy accept; ip saddr @blocked_ipv4 counter drop; ether saddr @blocked_mac counter drop; }\n'
+		printf '}\n'
+	} > "$block_nft"
+	if ! nft -c -f "$block_nft" >/dev/null 2>&1; then
+		rm -f "$block_nft"
+		return 1
+	fi
+	nft delete table inet proxyos_block >/dev/null 2>&1 || true
+	if ! nft -f "$block_nft" >/dev/null 2>&1; then
+		rm -f "$block_nft"
+		return 1
+	fi
+	rm -f "$block_nft"
+	return 0
+}
+
 ensure_state() {
-	mkdir -p "$STATE_DIR"
+	mkdir -p "$STATE_DIR" /tmp/proxyos
 	[ -s "$NODES_FILE" ] || printf '[]\n' > "$NODES_FILE"
 	[ -s "$DEVICES_FILE" ] || printf '[]\n' > "$DEVICES_FILE"
+	if [ ! -s "$PRESENCE_FILE" ]; then
+		if [ -s "$PRESENCE_STATE_FILE" ]; then cp "$PRESENCE_STATE_FILE" "$PRESENCE_FILE"; else printf '[]\n' > "$PRESENCE_FILE"; fi
+	fi
 	[ -s "$SUBSCRIPTIONS_FILE" ] || printf '[]\n' > "$SUBSCRIPTIONS_FILE"
 	# rpcd starts one proxyosctl process per method. A fixed migration
 	# filename lets concurrent dashboard requests overwrite each other.
 	if ! jq -e 'all(.[];
-		has("backup_node_id") and has("failure_mode") and has("auto_source")
+		has("backup_node_id") and has("failure_mode") and has("auto_source") and has("last_seen")
 	)' "$DEVICES_FILE" >/dev/null 2>&1; then
 		migrate_lock="${DEVICES_FILE}.migrate.lock"
 		migrate_wait=0
 		while ! mkdir "$migrate_lock" 2>/dev/null; do
 			if jq -e 'all(.[];
-				has("backup_node_id") and has("failure_mode") and has("auto_source")
+				has("backup_node_id") and has("failure_mode") and has("auto_source") and has("last_seen")
 			)' "$DEVICES_FILE" >/dev/null 2>&1; then
 				return 0
 			fi
@@ -62,16 +137,18 @@ ensure_state() {
 		# Re-check after taking the lock because another request may have
 		# completed the migration while this process was waiting.
 		if jq -e 'all(.[];
-			has("backup_node_id") and has("failure_mode") and has("auto_source")
+			has("backup_node_id") and has("failure_mode") and has("auto_source") and has("last_seen")
 		)' "$DEVICES_FILE" >/dev/null 2>&1; then
 			rmdir "$migrate_lock"
 			return 0
 		fi
 		migrate_file="${DEVICES_FILE}.migrate.$$"
-		jq 'map(. + {
+		migration_now="$(date +%s)"
+		jq --argjson now "$migration_now" 'map(. + {
 			backup_node_id:(.backup_node_id // ""),
 			failure_mode:(.failure_mode // "block"),
-			auto_source:(.auto_source // "all")
+			auto_source:(.auto_source // "all"),
+			last_seen:(.last_seen // $now)
 		})' "$DEVICES_FILE" > "$migrate_file"
 		mv "$migrate_file" "$DEVICES_FILE"
 		rmdir "$migrate_lock"
@@ -203,6 +280,65 @@ devices() {
 			' >> "$tmp_discovered" || true
 	done
 
+	# Merge clients learned behind external APs and bridge-mode routers. NAT
+	# clients cannot be enumerated because their MAC addresses never reach us.
+	if [ -r /tmp/proxyos/lan-devices ]; then
+		while IFS="	" read -r mac ip hostname ap_port activity_age; do
+			[ -n "${mac:-}" ] && [ -n "${ap_port:-}" ] || continue
+			mac_lower="$(printf '%s' "$mac" | tr 'A-F' 'a-f')"
+			device_role="$(awk -v mac="$mac_lower" 'tolower($1) == mac { print $2; exit }' /tmp/proxyos/lan-device-types 2>/dev/null)"
+			connection_type=""
+			if [ "$device_role" = "access_point" ]; then
+				connection_type="external_ap_device"
+			elif [ "$device_role" = "router" ]; then
+				connection_type="external_router_device"
+			elif awk -v port="$ap_port" '$3 == port && $2 == "access_point" { found=1 } END { exit !found }' /tmp/proxyos/lan-device-types 2>/dev/null; then
+				connection_type="wifi_external_ap"
+			elif awk -v port="$ap_port" '$3 == port && $2 == "router" { found=1 } END { exit !found }' /tmp/proxyos/lan-device-types 2>/dev/null; then
+				connection_type="wifi_external_router"
+			elif awk -v port="$ap_port" '$1 == port && ($4 == "name-match" || $4 == "configured-ap") { found=1 } END { exit !found }' /tmp/proxyos/ap-devices 2>/dev/null; then
+				connection_type="wifi_external_ap"
+			elif awk -v port="$ap_port" '$1 == port && $4 == "ap-or-switch" { found=1 } END { exit !found }' /tmp/proxyos/ap-devices 2>/dev/null; then
+				connection_type="lan_bridge_downstream"
+			else
+				continue
+			fi
+			[ "${hostname:-*}" = "*" ] && hostname="Unknown device"
+			online_state=false
+			case "$device_role" in
+				access_point|router)
+					[ "$(cat "/sys/class/net/${ap_port}/carrier" 2>/dev/null || true)" = "1" ] && online_state=true
+					;;
+				*)
+					case "${activity_age:-999999}" in *[!0-9]*|'') activity_age=999999 ;; esac
+					[ "$activity_age" -le 15 ] && online_state=true
+					;;
+			esac
+			device_type="${device_role:-external_client}"
+			case "$(printf '%s' "$hostname" | tr 'A-Z' 'a-z')" in
+				*router*|*gateway*|*路由*) device_type="router" ;;
+				*external-ap*|*access-point*|*unifi*|*omada*|*wireless-ap*|*wifi-ap*) device_type="access_point" ;;
+				*iphone*|*android*|*phone*|*手机*) device_type="phone" ;;
+				*desktop*|*laptop*|*macbook*|*computer*|*电脑*) device_type="computer" ;;
+			esac
+			jq -nc --arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" \
+				--arg ip "${ip:--}" --arg name "${hostname:-External AP device}" \
+				--arg port "$ap_port" --arg connection "$connection_type" --arg type "$device_type" \
+				--argjson online "$online_state" \
+				'{mac:$mac,ip:(if $ip=="-" then "" else $ip end),name:$name,connection:$connection,type:$type,band:(if $connection=="wifi_external_ap" then "经外接 AP" elif $connection=="wifi_external_router" then "经外接路由器" elif $connection=="external_ap_device" then "AP 本体" elif $connection=="external_router_device" then "路由器本体" else "桥接下游" end),ap_port:$port,detection:"bridge-fdb",online:$online}' \
+				>> "$tmp_discovered"
+		done < /tmp/proxyos/lan-devices
+	fi
+
+	if [ -r /tmp/proxyos/lan-device-types ]; then
+		while IFS="	" read -r mac device_type physical_port evidence; do
+			[ -n "${mac:-}" ] && [ -n "${device_type:-}" ] || continue
+			jq -nc --arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" \
+				--arg type "$device_type" --arg port "$physical_port" --arg evidence "$evidence" \
+				'{mac:$mac,type:$type,physical_port:$port,detection:$evidence}' >> "$tmp_discovered"
+		done < /tmp/proxyos/lan-device-types
+	fi
+
 	ip neigh show dev "$lan_device" 2>/dev/null |
 	awk '
 		/lladdr/ && ($NF == "REACHABLE" || $NF == "DELAY" || $NF == "PROBE" || $NF == "PERMANENT") {
@@ -232,16 +368,78 @@ devices() {
 		printf '[]\n' > "$tmp_result"
 	fi
 
-	jq -n --slurpfile discovered "$tmp_result" --slurpfile saved "$DEVICES_FILE" '{
+	presence_now="$(date +%s)"
+	presence_lock="${PRESENCE_FILE}.lock"
+	if mkdir "$presence_lock" 2>/dev/null; then
+		presence_tmp="${PRESENCE_FILE}.tmp.$$"
+		if jq --argjson now "$presence_now" --slurpfile live "$tmp_result" '
+			reduce ($live[0][] | select(.online == true)) as $device
+				(.;
+					if any(.[]; .mac == $device.mac) then
+						map(if .mac == $device.mac then .last_seen = $now else . end)
+					else . + [{mac:$device.mac,last_seen:$now}] end
+				) |
+			map(select(($now - (.last_seen // 0)) <= 604800))
+		' "$PRESENCE_FILE" > "$presence_tmp"; then
+			mv "$presence_tmp" "$PRESENCE_FILE"
+			presence_saved_at="$(stat -c %Y "$PRESENCE_STATE_FILE" 2>/dev/null || printf '0')"
+			case "$presence_saved_at" in *[!0-9]*|'') presence_saved_at=0 ;; esac
+			if [ $((presence_now - presence_saved_at)) -ge 300 ]; then
+				cp "$PRESENCE_FILE" "$PRESENCE_STATE_FILE"
+			fi
+		else
+			rm -f "$presence_tmp"
+		fi
+		rmdir "$presence_lock"
+	fi
+
+	jq -n --argjson now "$presence_now" --slurpfile discovered "$tmp_result" --slurpfile saved "$DEVICES_FILE" --slurpfile presence "$PRESENCE_FILE" '{
 		items: (
 			($saved[0] // [] | map(. + {online:false})) as $configured |
 			reduce ($discovered[0] // [])[] as $live
 				($configured;
 					if any(.[]; .mac == $live.mac) then
-						map(if .mac == $live.mac then . * $live else . end)
-					else . + [{name:"Unknown device"} + $live + {policy:"system_default",node_id:""}]
+						map(
+							if .mac == $live.mac then
+								. as $saved_device |
+								(. * $live) |
+								if ($saved_device.custom_name // false)
+								then .name = $saved_device.name | .custom_name = true
+								else . end
+							else . end
+						)
+					else . + [$live + {policy:"system_default",node_id:"",custom_name:false}]
 					end
 				) |
+			map(
+				. as $device |
+				([($presence[0] // [])[] | select(.mac == $device.mac) | .last_seen][0] // (.last_seen // 0)) as $seen |
+				.last_seen = (if .online then $now else $seen end)
+			) |
+			map(select(.online == true or ($now - (.last_seen // 0)) <= 604800)) |
+			map(
+				if (.connection == "external_ap_device" and ((.custom_name // false) | not)) then
+					.name = "AP"
+				elif (.connection == "external_router_device" and ((.name // "") == "" or (.name // "") == "Unknown device")) then
+					.name = "外接路由器"
+				elif ((.name // "") == "" or (.name // "") == "Unknown device") then
+					.name = (
+						if .connection == "external_ap_device" then "AP"
+						elif .connection == "external_router_device" then "外接路由器"
+						elif .connection == "wifi_external_ap" then "AP 无线终端 · " + (.ip // (.mac[-8:]))
+						elif .connection == "wifi_external_router" then "路由器无线终端 · " + (.ip // (.mac[-8:]))
+						elif .connection == "wifi" then "无线终端 · " + (.ip // (.mac[-8:]))
+						else "局域网设备 · " + (.ip // (.mac[-8:])) end
+					)
+				else . end |
+				(.name // "" | ascii_downcase) as $n |
+				if (.type // "") != "" then .
+				elif ($n|contains("iphone")) or ($n|contains("android")) or ($n|contains("phone")) or ($n|contains("手机")) then .type="phone"
+				elif ($n|contains("desktop")) or ($n|contains("laptop")) or ($n|contains("macbook")) or ($n|contains("computer")) or ($n|contains("电脑")) then .type="computer"
+				elif ($n|contains("router")) or ($n|contains("gateway")) or ($n|contains("路由")) then .type="router"
+				elif ($n|contains("access-point")) or ($n|contains("external-ap")) or ($n|contains("unifi")) or ($n|contains("omada")) or ($n|contains("wifi-ap")) then .type="access_point"
+				else .type="other" end
+			) |
 			sort_by([(.online | not), .name])
 		)
 	}'
@@ -903,6 +1101,7 @@ health_check() {
 
 egress_check() {
 	input="$1"
+	platform_preflight egress
 	node_id="$(printf '%s' "$input" | jq -r '.node_id // empty')"
 	device_mac="$(printf '%s' "$input" | jq -r '.device_mac // empty' | tr 'a-f' 'A-F')"
 	test_config="/tmp/proxyos-egress-test.$$.json"
@@ -997,6 +1196,8 @@ device_bind() {
 	mac="$(printf '%s' "$input" | jq -r '.mac // empty' | tr 'a-f' 'A-F')"
 	ip="$(printf '%s' "$input" | jq -r '.ip // empty')"
 	name="$(printf '%s' "$input" | jq -r '.name // "Unknown device"')"
+	last_seen="$(date +%s)"
+	custom_name="$(printf '%s' "$input" | jq -r '.custom_name // false')"
 	policy="$(printf '%s' "$input" | jq -r '.policy // "system_default"')"
 	node_id="$(printf '%s' "$input" | jq -r '.node_id // ""')"
 	backup_node_id="$(printf '%s' "$input" | jq -r '.backup_node_id // ""')"
@@ -1011,6 +1212,7 @@ device_bind() {
 	esac
 	case "$failure_mode" in block|backup|direct) ;; *) json_error "Invalid node failure mode" ;; esac
 	case "$auto_source" in all|manual|subscription) ;; *) json_error "Invalid automatic-node source" ;; esac
+	case "$custom_name" in true|false) ;; *) json_error "Invalid custom-name flag" ;; esac
 	if [ "$policy" = "fixed_node" ]; then
 		jq -e --arg id "$node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
 			json_error "Selected node does not exist"
@@ -1030,12 +1232,16 @@ device_bind() {
 
 	device_json="$(jq -n \
 		--arg mac "$mac" --arg ip "$ip" --arg name "$name" \
+		--argjson custom_name "$custom_name" \
+		--argjson last_seen "$last_seen" \
 		--arg policy "$policy" --arg node_id "$node_id" \
 		--arg backup "$backup_node_id" --arg failure "$failure_mode" --arg source "$auto_source" \
 		'{
 			mac:$mac,
 			ip:$ip,
 			name:$name,
+			custom_name:$custom_name,
+			last_seen:$last_seen,
 			policy:$policy,
 			node_id:$node_id,
 			backup_node_id:$backup,
@@ -1058,16 +1264,18 @@ device_bind() {
 	rm -f "$devices_rollback"
 
 	if [ "${PROXYOS_SKIP_DHCP:-0}" != "1" ]; then
+		dhcp_name="$(dhcp_safe_name "$name")"
 		existing_section="$(uci show dhcp 2>/dev/null |
 			sed -n "s/^\(dhcp\.[^.]*\)\.mac='${mac}'$/\1/p" | head -n 1)"
 		if [ -z "$existing_section" ]; then
 			existing_section="dhcp.$(uci add dhcp host)"
 		fi
-		uci set "${existing_section}.name=${name}"
+		uci set "${existing_section}.name=${dhcp_name}"
 		uci set "${existing_section}.mac=${mac}"
 		uci set "${existing_section}.ip=${ip}"
 		uci commit dhcp
-		/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1 ||
+			json_error "设备策略已保存，但 DNS/DHCP 服务重启失败"
 	fi
 
 	json_ok
@@ -1327,14 +1535,22 @@ apply_generated_config_raw() {
 	[ ! -s "$ACTIVE_CONFIG" ] || cp "$ACTIVE_CONFIG" "$LAST_GOOD_CONFIG"
 	mv "$candidate" "$ACTIVE_CONFIG"
 	if [ "${PROXYOS_SKIP_RESTART:-0}" = "1" ]; then
+		sync_block_firewall || {
+			APPLY_ERROR="无法应用设备禁止联网防火墙规则"
+			return 1
+		}
 		return 0
 	fi
 	restart_proxy_service || {
 		if [ -s "$LAST_GOOD_CONFIG" ]; then
 			cp "$LAST_GOOD_CONFIG" "$ACTIVE_CONFIG"
-			restart_proxy_service || true
+		restart_proxy_service || true
 		fi
 		APPLY_ERROR="Proxy restart failed; previous configuration was restored"
+		return 1
+	}
+	sync_block_firewall || {
+		APPLY_ERROR="代理配置已启动，但无法应用设备禁止联网防火墙规则"
 		return 1
 	}
 	return 0
@@ -1743,6 +1959,7 @@ subscription_delete() {
 
 subscription_update() {
 	input="$1"
+	platform_preflight subscription
 	sub_id="$(printf '%s' "$input" | jq -r '.id // empty')"
 	url="$(jq -r --arg id "$sub_id" '.[] | select(.id == $id) | .url' "$SUBSCRIPTIONS_FILE")"
 	[ -n "$url" ] || json_error "Subscription not found"
@@ -2101,6 +2318,7 @@ esac
 
 case "$command_name" in
 	status) status ;;
+	block-firewall-sync) sync_block_firewall && json_ok ;;
 	devices) devices ;;
 	nodes) nodes ;;
 	node-get) node_get "$input" ;;

@@ -114,6 +114,9 @@ uci commit wireless
 /etc/init.d/sing-box disable >/dev/null 2>&1 || true
 /etc/init.d/proxyos enable
 /etc/init.d/proxyos-health enable
+/etc/init.d/proxyos-port-detect enable
+/etc/init.d/proxyos-platform-doctor enable
+/etc/init.d/proxyos-lan-watch enable
 /etc/init.d/rpcd reload >/dev/null 2>&1 || true
 
 exit 0

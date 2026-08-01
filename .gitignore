@@ -4,7 +4,9 @@
 __pycache__/
 *.pyc
 dist/
+artifacts/
 edge-*/
 ui-*.png
 .sample-sing-box.json
 work/
+tools/router-*.sh

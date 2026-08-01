@@ -21,6 +21,17 @@ jobs:
         run: npm test && npm run check
       - name: Run portable hardware detection checks
         run: bash ./tests/run-hardware-detection-test.sh
+      - name: Check OpenWrt service script syntax
+        run: |
+          sh -n \
+            rootfs/usr/libexec/proxyos/proxyosctl \
+            rootfs/usr/sbin/proxyos-detect-ports \
+            rootfs/usr/sbin/proxyos-platform-doctor \
+            rootfs/usr/sbin/proxyos-selftest \
+            rootfs/usr/sbin/proxyos-watch-lan \
+            rootfs/etc/init.d/proxyos-lan-watch \
+            rootfs/etc/init.d/proxyos-platform-doctor \
+            rootfs/etc/init.d/proxyos-port-detect
       - name: Run controller integration checks
         run: |
           curl --fail --location --retry 3 \

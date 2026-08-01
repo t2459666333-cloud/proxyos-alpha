@@ -1,0 +1,177 @@
+#!/bin/sh
+
+TAG="proxyos-port-detect"
+STATE_DIR="/etc/proxyos"
+DONE_FILE="$STATE_DIR/port-role-detected"
+LOCK_DIR="/var/lock/proxyos-port-detect.lock"
+PROBE_HOOK="/usr/libexec/proxyos-udhcpc-probe"
+PROBE_TIMEOUT="${PROXYOS_PROBE_TIMEOUT:-6}"
+DEFAULT_LAN_IP="${PROXYOS_LAN_IP:-192.168.8.1}"
+
+log() {
+	logger -t "$TAG" "$*"
+	printf '%s: %s\n' "$TAG" "$*" >&2
+}
+
+is_candidate() {
+	local iface="$1" type lower
+	[ -d "/sys/class/net/$iface" ] || return 1
+	[ "$iface" != "lo" ] || return 1
+	[ -e "/sys/class/net/$iface/device" ] || return 1
+	[ ! -d "/sys/class/net/$iface/wireless" ] || return 1
+	[ ! -e "/sys/class/net/$iface/bridge" ] || return 1
+	case "$iface" in
+		br-*|bond*|docker*|ifb*|ppp*|tun*|tap*|veth*|wg*|wlan*|phy*|*.\*) return 1 ;;
+	esac
+	type="$(cat "/sys/class/net/$iface/type" 2>/dev/null)"
+	[ "$type" = "1" ] || return 1
+	# A DSA conduit/CPU port exposes switch user ports as lower_* links.
+	# It must not be assigned directly when lan1/lan2/wan are available.
+	for lower in "/sys/class/net/$iface"/lower_*; do
+		[ -e "$lower" ] && return 1
+	done
+	return 0
+}
+
+has_carrier() {
+	[ "$(cat "/sys/class/net/$1/carrier" 2>/dev/null)" = "1" ]
+}
+
+probe_dhcp() {
+	local iface="$1" result="/tmp/proxyos-dhcp-$1.$$" master="" success=1
+	rm -f "$result"
+	master="$(basename "$(readlink -f "/sys/class/net/$iface/master" 2>/dev/null)" 2>/dev/null)"
+	[ -z "$master" ] || ip link set dev "$iface" nomaster 2>/dev/null
+	if ! ip link set dev "$iface" up 2>/dev/null; then
+		[ -z "$master" ] || ip link set dev "$iface" master "$master" 2>/dev/null
+		return 1
+	fi
+	PROXYOS_PROBE_RESULT="$result" udhcpc \
+		-f -q -n -t 1 -T "$PROBE_TIMEOUT" \
+		-i "$iface" -s "$PROBE_HOOK" \
+		-p "/var/run/proxyos-udhcpc-$iface.pid" \
+		-x hostname:ProxyOS-probe >/dev/null 2>&1
+	if [ -s "$result" ]; then
+		success=0
+	fi
+	rm -f "$result"
+	# A failed candidate must be restored immediately. The selected WAN stays
+	# detached and apply_roles() will hand ownership to netifd.
+	if [ "$success" -ne 0 ] && [ -n "$master" ] && [ -d "/sys/class/net/$master" ]; then
+		ip link set dev "$iface" master "$master" 2>/dev/null
+	fi
+	return "$success"
+}
+
+existing_explicit_wan() {
+	local dev
+	dev="$(uci -q get network.wan.device)"
+	[ -n "$dev" ] || dev="$(uci -q get network.wan.ifname)"
+	case "$dev" in
+		wan|wan[0-9]*) [ -d "/sys/class/net/$dev" ] && printf '%s\n' "$dev" ;;
+	esac
+}
+
+apply_roles() {
+	local wan="$1" lan_ports="$2" lan_ip lan_mask port
+	lan_ip="$(uci -q get network.lan.ipaddr)"
+	lan_mask="$(uci -q get network.lan.netmask)"
+	[ -n "$lan_ip" ] || lan_ip="$DEFAULT_LAN_IP"
+	[ -n "$lan_mask" ] || lan_mask="255.255.255.0"
+
+	uci -q batch <<-EOF
+		set network.br_lan=device
+		set network.br_lan.name='br-lan'
+		set network.br_lan.type='bridge'
+		delete network.br_lan.ports
+		set network.lan=interface
+		set network.lan.device='br-lan'
+		set network.lan.proto='static'
+		set network.lan.ipaddr='$lan_ip'
+		set network.lan.netmask='$lan_mask'
+		delete network.lan.ifname
+		set network.wan=interface
+		set network.wan.device='$wan'
+		set network.wan.proto='dhcp'
+		delete network.wan.ifname
+		set network.wan6=interface
+		set network.wan6.device='$wan'
+		set network.wan6.proto='dhcpv6'
+		delete network.wan6.ifname
+	EOF
+	for port in $lan_ports; do
+		uci -q add_list network.br_lan.ports="$port"
+	done
+	uci -q commit network || return 1
+
+	mkdir -p "$STATE_DIR"
+	{
+		printf 'wan=%s\n' "$wan"
+		printf 'lan=%s\n' "$lan_ports"
+		date -u '+detected_at=%Y-%m-%dT%H:%M:%SZ'
+	} > "$DONE_FILE"
+
+	log "detected WAN=$wan; LAN=$lan_ports"
+	ubus call network reload >/dev/null 2>&1 || /etc/init.d/network restart
+}
+
+main() {
+	local force=0 candidates="" linked="" unlinked="" iface wan="" lan_ports="" count=0 preset
+	[ "$1" = "--force" ] && force=1
+	[ "$force" -eq 1 ] || [ ! -s "$DONE_FILE" ] || exit 0
+
+	if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+		log "another detection is already running"
+		exit 1
+	fi
+	trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT INT TERM
+
+	for path in /sys/class/net/*; do
+		iface="${path##*/}"
+		is_candidate "$iface" || continue
+		count=$((count + 1))
+		candidates="$candidates $iface"
+		if has_carrier "$iface"; then
+			linked="$linked $iface"
+		else
+			unlinked="$unlinked $iface"
+		fi
+	done
+
+	[ "$count" -ge 2 ] || {
+		log "fewer than two physical Ethernet ports; keeping current configuration"
+		exit 1
+	}
+
+	preset="$(existing_explicit_wan)"
+	if [ -n "$preset" ]; then
+		wan="$preset"
+		log "using board-defined WAN port $wan"
+	else
+		for iface in $linked $unlinked; do
+			log "probing DHCP on $iface"
+			if probe_dhcp "$iface"; then
+				wan="$iface"
+				break
+			fi
+		done
+	fi
+
+	[ -n "$wan" ] || {
+		log "no DHCP upstream found; keeping current configuration"
+		exit 2
+	}
+
+	for iface in $candidates; do
+		[ "$iface" = "$wan" ] || lan_ports="$lan_ports $iface"
+	done
+	lan_ports="${lan_ports# }"
+	[ -n "$lan_ports" ] || {
+		log "no LAN port remains; keeping current configuration"
+		exit 3
+	}
+
+	apply_roles "$wan" "$lan_ports"
+}
+
+main "$@"

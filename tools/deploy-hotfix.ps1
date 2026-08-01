@@ -49,8 +49,16 @@ $files = [ordered]@{
     "rootfs/usr/libexec/proxyos/subscription_parser.py" = "/usr/libexec/proxyos/subscription_parser.py"
     "rootfs/usr/libexec/rpcd/proxyos" = "/usr/libexec/rpcd/proxyos"
     "rootfs/usr/share/rpcd/acl.d/proxyos.json" = "/usr/share/rpcd/acl.d/proxyos.json"
+    "rootfs/etc/init.d/proxyos-lan-watch" = "/etc/init.d/proxyos-lan-watch"
+    "rootfs/etc/init.d/proxyos-platform-doctor" = "/etc/init.d/proxyos-platform-doctor"
+    "rootfs/etc/init.d/proxyos-port-detect" = "/etc/init.d/proxyos-port-detect"
     "rootfs/etc/init.d/proxyos-health" = "/etc/init.d/proxyos-health"
     "rootfs/etc/proxyos/config-template.json" = "/etc/proxyos/config-template.json"
+    "rootfs/etc/proxyos/version" = "/etc/proxyos/version"
+    "rootfs/usr/sbin/proxyos-detect-ports" = "/usr/sbin/proxyos-detect-ports"
+    "rootfs/usr/sbin/proxyos-platform-doctor" = "/usr/sbin/proxyos-platform-doctor"
+    "rootfs/usr/sbin/proxyos-selftest" = "/usr/sbin/proxyos-selftest"
+    "rootfs/usr/sbin/proxyos-watch-lan" = "/usr/sbin/proxyos-watch-lan"
     "rootfs/www/assets/app.js" = "/www/assets/app.js"
     "rootfs/www/assets/app.css" = "/www/assets/app.css"
     "rootfs/www/assets/proxyos-mark.svg" = "/www/assets/proxyos-mark.svg"
@@ -96,7 +104,7 @@ try {
         command = "/bin/sh"
         params = @(
             "-c",
-            "chmod 0755 /usr/libexec/proxyos/proxyosctl /usr/libexec/proxyos/subscription_parser.py /usr/libexec/rpcd/proxyos /etc/init.d/proxyos-health; /etc/init.d/rpcd restart; /etc/init.d/uhttpd restart; /etc/init.d/proxyos restart; /etc/init.d/proxyos-health restart"
+            "touch /etc/proxyos/ap-ports; chmod 0600 /etc/proxyos/ap-ports; chmod 0755 /usr/libexec/proxyos/proxyosctl /usr/libexec/proxyos/subscription_parser.py /usr/libexec/rpcd/proxyos /usr/sbin/proxyos-detect-ports /usr/sbin/proxyos-platform-doctor /usr/sbin/proxyos-selftest /usr/sbin/proxyos-watch-lan /etc/init.d/proxyos-health /etc/init.d/proxyos-lan-watch /etc/init.d/proxyos-platform-doctor /etc/init.d/proxyos-port-detect; /etc/init.d/proxyos-lan-watch enable; /etc/init.d/proxyos-platform-doctor enable; /etc/init.d/proxyos-port-detect enable; /etc/init.d/rpcd restart; /etc/init.d/uhttpd restart; /etc/init.d/proxyos restart; /etc/init.d/proxyos-health restart; /etc/init.d/proxyos-lan-watch restart; /etc/init.d/proxyos-platform-doctor restart; /etc/init.d/proxyos-port-detect restart"
         )
     } | Out-Null
 } catch {
@@ -105,4 +113,4 @@ try {
 }
 
 Start-Sleep -Seconds 8
-Write-Host "ProxyOS 0.2.2 hotfix deployed. Reload http://$Router/ with Ctrl+F5."
+Write-Host "ProxyOS 0.3.0-rc7 hotfix deployed. Reload http://$Router/ and sign in again."

@@ -18,6 +18,7 @@ chmod 0755 \
 export PATH="${PROJECT_DIR}/.tools-cache:${PROJECT_DIR}/tests/mocks:${PATH}"
 export PYTHONPATH="${PROJECT_DIR}/.tools-cache/python${PYTHONPATH:+:${PYTHONPATH}}"
 export PROXYOS_SKIP_RESTART=1
+export PROXYOS_SKIP_FIREWALL=1
 export PROXYOS_PARSER="${PROJECT_DIR}/rootfs/usr/libexec/proxyos/subscription_parser.py"
 if [[ "${OS:-}" == "Windows_NT" ]]; then
   export PROXYOS_SKIP_CONFIG_CHECK=1

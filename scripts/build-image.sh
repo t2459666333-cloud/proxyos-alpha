@@ -27,10 +27,17 @@ mkdir -p "${WORK_DIR}" "${DIST_DIR}"
 chmod 0755 \
   "${PROJECT_DIR}/rootfs/etc/init.d/proxyos" \
   "${PROJECT_DIR}/rootfs/etc/init.d/proxyos-health" \
+  "${PROJECT_DIR}/rootfs/etc/init.d/proxyos-lan-watch" \
+  "${PROJECT_DIR}/rootfs/etc/init.d/proxyos-platform-doctor" \
+  "${PROJECT_DIR}/rootfs/etc/init.d/proxyos-port-detect" \
   "${PROJECT_DIR}/rootfs/etc/uci-defaults/99-proxyos" \
   "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" \
   "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/subscription_parser.py" \
-  "${PROJECT_DIR}/rootfs/usr/libexec/rpcd/proxyos"
+  "${PROJECT_DIR}/rootfs/usr/libexec/rpcd/proxyos" \
+  "${PROJECT_DIR}/rootfs/usr/sbin/proxyos-detect-ports" \
+  "${PROJECT_DIR}/rootfs/usr/sbin/proxyos-platform-doctor" \
+  "${PROJECT_DIR}/rootfs/usr/sbin/proxyos-selftest" \
+  "${PROJECT_DIR}/rootfs/usr/sbin/proxyos-watch-lan"
 
 if [[ ! -f "${WORK_DIR}/${ARCHIVE}" ]]; then
   echo "[1/5] Downloading OpenWrt ${OPENWRT_VERSION} ImageBuilder"

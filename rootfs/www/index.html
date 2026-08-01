@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>ProxyOS</title>
-    <link rel="icon" type="image/svg+xml" href="/assets/proxyos-mark.svg?v=0.3.0rc6" />
-    <link rel="stylesheet" href="/assets/app.css?v=0.3.0rc6" />
+    <link rel="icon" type="image/svg+xml" href="/assets/proxyos-mark.svg?v=0.3.0rc7-4" />
+    <link rel="stylesheet" href="/assets/app.css?v=0.3.0rc7-10" />
   </head>
   <body>
     <div id="toast" class="toast" aria-live="polite"></div>
@@ -201,6 +201,10 @@
         </div>
         <div class="drawer-tabs"><button type="button" class="is-active" data-drawer-tab="settings">设备设置</button><button type="button" data-drawer-tab="connection">连接信息</button></div>
         <form id="device-policy-form" class="drawer-body" data-drawer-panel="settings">
+          <div class="drawer-section device-name-editor">
+            <label>设备名称<input id="drawer-device-name-input" maxlength="48" placeholder="例如：客厅 iPhone、办公室电脑" /></label>
+            <p class="form-note">名称会绑定到该设备的 MAC 地址，便于区分外接 AP、路由器及其下属终端。</p>
+          </div>
           <fieldset class="radio-list">
             <legend>连接策略</legend>
             <label><span class="option-icon"><span class="icon" data-icon="monitor"></span></span><span class="option-copy"><strong>系统默认</strong><small>使用系统默认的路由策略</small></span><input type="radio" name="policy" value="system_default" /></label>
@@ -321,6 +325,6 @@
       </section>
     </div>
 
-    <script src="/assets/app.js?v=0.3.0rc6" type="module"></script>
+    <script src="/assets/app.js?v=0.3.0rc7-10" type="module"></script>
   </body>
 </html>
