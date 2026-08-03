@@ -1,4 +1,4 @@
-# ProxyOS 0.3.0 RC8
+# ProxyOS 1.0.0
 
 ProxyOS is an x86-64 OpenWrt derivative focused on one job: assigning an
 independent sing-box outbound to every LAN or Wi-Fi client.
@@ -6,19 +6,27 @@ independent sing-box outbound to every LAN or Wi-Fi client.
 This repository contains a reproducible OpenWrt ImageBuilder project. It does
 not contain a renamed stock image or a placeholder firmware file.
 
-## 0.3.0 RC8 scope
+## 1.0.0 scope
 
 - OpenWrt 25.12.5 x86-64, UEFI and legacy BIOS images
 - A custom responsive Web console
 - OpenWrt `rpcd`/`ubus` authentication
-- Device discovery from DHCP leases and the neighbour table
-- Fast two-second LAN presence tracking with FDB activity, five-second UI
-  refresh, immediate offline display, and automatic hiding of profiles that
-  have not returned for seven days
+- Evidence-scored device identity from DHCP names and client classes, mDNS
+  services through OpenWrt `umdns`, bridge FDB, neighbour state, hostapd,
+  usteer, LLDP/CDP, topology, and previously confirmed profiles
+- Fast two-second LAN presence tracking with FDB activity and bounded ARP
+  confirmation for quiet external-AP clients, five-second UI refresh,
+  one-minute disconnect confirmation, and automatic hiding of profiles that have
+  not returned for seven days
 - External AP/router topology classification: infrastructure devices and their
   downstream clients are shown separately, with per-client proxy assignment
+- OpenWrt APs running `usteer` provide exact association state; `lldpd` is used
+  to identify compatible adjacent AP, router, and switch infrastructure
 - One consistent online-state model across Overview, Devices, and Wi-Fi;
   infrastructure devices are excluded from client totals
+- Unknown randomized-MAC clients remain neutral wireless devices until enough
+  evidence exists; new evidence can automatically correct their name and type
+  without assigning a computer/AP icon by guesswork
 - Per-device policies: fixed node, automatic node, direct, block, or system default
 - Per-device backup node and block/direct/backup failure behavior
 - Manual sing-box outbound import (all protocols supported by the installed
@@ -81,7 +89,7 @@ not contain a renamed stock image or a placeholder firmware file.
 - Update checks that degrade gracefully when no public release channel has
   been configured yet and never offer an older release candidate as an update
 
-## Release-candidate limitations
+## Known limitations
 
 - Clash subscriptions import proxy nodes, not Clash routing rules, proxy groups,
   or rule providers. ProxyOS owns routing so that per-device policies remain deterministic.
@@ -91,6 +99,11 @@ not contain a renamed stock image or a placeholder firmware file.
   only production gateway.
 - Wireless support depends on the installed chipset and driver. Detection is
   accurate; universal AP-mode support cannot be guaranteed on x86.
+- Arbitrary third-party APs do not expose a universal association API. When an
+  AP cannot report its station table, ProxyOS marks client status from recent
+  bridge activity plus bounded IPv4/IPv6 reachability confirmation and labels
+  that status as estimated. OpenWrt APs with usteer and local hostapd clients
+  use exact association state.
 - Protocol-specific forms cover common fields; uncommon sing-box fields remain
   available through raw outbound JSON.
 - Firmware upload/sysupgrade and signed online updates are not exposed yet.
@@ -126,11 +139,13 @@ device data; it does not alter the host network.
 - Management address: `http://192.168.10.1`
 - User: `root`
 - Initial password: blank, matching stock OpenWrt first boot
-- With two or more physical Ethernet ports: first port is WAN, remaining ports
-  are LAN
+- With two or more physical Ethernet ports: a first-boot DHCP probe identifies
+  the upstream WAN and bridges the remaining ports as LAN. Connect only the
+  real upstream cable during initial detection when multiple DHCP servers are
+  present.
 - With only one Ethernet port: it is assigned to WAN first; use a local console
   or preconfigure an alternate management interface before relying on it as the
   only management path
 
 Set the root password immediately after first login. Do not expose an
-unconfigured release candidate to an untrusted network.
+unconfigured gateway to an untrusted network.

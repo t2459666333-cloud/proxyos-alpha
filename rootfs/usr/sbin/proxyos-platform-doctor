@@ -37,7 +37,7 @@ main() {
 	service_running dnsmasq || /etc/init.d/dnsmasq restart >/dev/null 2>&1
 
 	missing=""
-	for command in jq curl sing-box uci ubus jsonfilter ip; do
+	for command in jq curl sing-box uci ubus jsonfilter ip arping umdns; do
 		command -v "$command" >/dev/null 2>&1 || missing="$missing $command"
 	done
 	command -v python3 >/dev/null 2>&1 || missing="$missing python3"
@@ -69,4 +69,3 @@ main() {
 }
 
 main "$@"
-

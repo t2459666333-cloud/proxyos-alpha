@@ -50,15 +50,13 @@ assert_physical_interfaces() {
   local actual
   actual="$(PROXYOS_NET_CLASS_ROOT="${NET_ROOT}" physical_interfaces)"
   local expected
-  if [[ "$(readlink -f "${NET_ROOT}/enp1s0/device")" == "${DEVICE_ROOT}/pci0000:00/0000:01:00.0" ]]; then
-    expected=$'enp1s0\neth7\neno9'
-  else
-    # Git Bash on Windows creates compatibility links instead of native
-    # symlinks. The exclusion logic is still tested there; PCI ordering is
-    # asserted on the Linux build runner.
-    expected=$'eno9\nenp1s0\neth7'
-  fi
-  if [[ "${actual}" != "${expected}" ]]; then
+  expected=$'enp1s0\neth7\neno9'
+  local compatibility_expected=$'eno9\nenp1s0\neth7'
+  # macOS and Git Bash do not always expose Linux sysfs symlink semantics.
+  # Accept their deterministic name order; PCI ordering remains mandatory on
+  # the Linux build runner and target router.
+  if [[ "${actual}" != "${expected}" ]] && \
+     ! { [[ "$(uname -s)" != "Linux" ]] && [[ "${actual}" == "${compatibility_expected}" ]]; }; then
     printf 'Physical interface detection failed for %s\nExpected:\n%s\nActual:\n%s\n' \
       "${source_file}" "${expected}" "${actual}" >&2
     exit 1

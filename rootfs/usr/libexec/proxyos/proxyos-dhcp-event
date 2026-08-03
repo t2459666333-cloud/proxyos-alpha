@@ -1,0 +1,51 @@
+#!/bin/sh
+
+# This file is sourced by OpenWrt's /usr/lib/dnsmasq/dhcp-script.sh.  Keep the
+# handler side-effect free for dnsmasq: never exit the parent script and never
+# depend on a writable persistent filesystem.
+
+case "${1:-}" in
+	add|old) ;;
+	*) return 0 2>/dev/null || true ;;
+esac
+
+proxyos_event_mac="$(printf '%s' "${2:-}" | tr 'A-F' 'a-f')"
+proxyos_event_ip="${3:-}"
+proxyos_event_name="${4:-}"
+printf '%s' "$proxyos_event_mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || {
+	return 0 2>/dev/null || true
+}
+
+proxyos_event_clean() {
+	printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c 1-160
+}
+
+proxyos_event_dir="/tmp/proxyos"
+proxyos_event_file="${proxyos_event_dir}/dhcp-fingerprints"
+proxyos_event_lock="${proxyos_event_file}.lock"
+mkdir -p "$proxyos_event_dir"
+
+# dnsmasq exports the useful DHCP identity options to its script.  They are
+# evidence, not truth: the LAN watcher assigns a confidence score before using
+# them to classify a device.
+proxyos_event_vendor="$(proxyos_event_clean "${DNSMASQ_VENDOR_CLASS:-${DNSMASQ_VENDOR_CLASS_ID:-}}")"
+proxyos_event_user="$(proxyos_event_clean "${DNSMASQ_USER_CLASS0:-${DNSMASQ_USER_CLASS:-}}")"
+proxyos_event_client="$(proxyos_event_clean "${DNSMASQ_CLIENT_ID:-}")"
+proxyos_event_name="$(proxyos_event_clean "$proxyos_event_name")"
+proxyos_event_now="$(date +%s)"
+
+if mkdir "$proxyos_event_lock" 2>/dev/null; then
+	awk -F '\t' -v wanted="$proxyos_event_mac" 'tolower($1) != wanted' \
+		"$proxyos_event_file" 2>/dev/null > "${proxyos_event_file}.tmp"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$proxyos_event_mac" "$proxyos_event_ip" "$proxyos_event_name" \
+		"$proxyos_event_vendor" "$proxyos_event_user" "$proxyos_event_client" \
+		"$proxyos_event_now" >> "${proxyos_event_file}.tmp"
+	mv "${proxyos_event_file}.tmp" "$proxyos_event_file"
+	rmdir "$proxyos_event_lock"
+fi
+
+unset proxyos_event_mac proxyos_event_ip proxyos_event_name proxyos_event_vendor
+unset proxyos_event_user proxyos_event_client proxyos_event_now proxyos_event_dir
+unset proxyos_event_file proxyos_event_lock
+return 0 2>/dev/null || true

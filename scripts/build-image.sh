@@ -38,6 +38,7 @@ chmod 0755 \
   "${PROJECT_DIR}/rootfs/etc/hotplug.d/iface/95-proxyos-remote-access" \
   "${PROJECT_DIR}/rootfs/etc/uci-defaults/99-proxyos" \
   "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" \
+  "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyos-dhcp-event" \
   "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/subscription_parser.py" \
   "${PROJECT_DIR}/rootfs/usr/libexec/rpcd/proxyos" \
   "${PROJECT_DIR}/rootfs/usr/sbin/proxyos-detect-ports" \
@@ -106,18 +107,32 @@ PACKAGES=(
   "rpcd-mod-iwinfo"
   "iw"
   "iwinfo"
+  "usteer"
+  "lldpd"
+  "umdns"
+  "ip-bridge"
+  "iputils-arping"
   "wifi-scripts"
   "wireless-regdb"
   "wpad-basic-mbedtls"
   "ethtool"
   "pciutils"
   "kmod-igc"
+  "kmod-igb"
+  "kmod-e1000"
   "kmod-e1000e"
+  "kmod-tg3"
+  "kmod-sky2"
+  "kmod-forcedeth"
+  "kmod-atlantic"
   "kmod-r8169"
   "kmod-r8125"
   "kmod-ixgbe"
   "kmod-i40e"
   "kmod-vmxnet3"
+  "kmod-usb-net-rtl8152"
+  "kmod-usb-net-asix"
+  "kmod-usb-net-asix-ax88179"
   "kmod-iwlwifi"
   "iwlwifi-firmware-ax200"
   "iwlwifi-firmware-ax201"

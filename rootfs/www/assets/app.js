@@ -357,10 +357,12 @@ function deviceIcon(device) {
   const text = `${device.name || ""} ${device.vendor || ""}`.toLowerCase();
   if (device.connection === "external_ap_device" || device.type === "access_point") return "access-point";
   if (device.connection === "external_router_device" || device.type === "router") return "router";
-  if (/iphone|android|pixel|phone|手机/.test(text)) return "smartphone";
+  if (device.type === "phone") return "smartphone";
+  if (/iphone|ipad|android|pixel|phone|oppo|oneplus|realme|vivo|galaxy|手机/.test(text)) return "smartphone";
   if (/tv|电视/.test(text)) return "tv";
   if (/playstation|ps5|xbox|游戏/.test(text)) return "gamepad";
   if (/macbook|laptop|笔记本/.test(text)) return "laptop";
+  if (isWifiDevice(device) && !["computer", "phone"].includes(device.type)) return "wifi";
   return "monitor";
 }
 function platformFor(device) {
@@ -368,11 +370,12 @@ function platformFor(device) {
   if (device.type === "router") return "下级路由器";
   if (device.type === "phone") return "手机 / 移动设备";
   if (device.type === "computer") return "电脑";
+  if (device.type === "downstream_device") return "无线设备（自动识别中）";
   if (device.type === "external_client") return "外接 AP 客户端";
   const name = (device.name || "").toLowerCase();
   if (name.includes("iphone")) return "Apple / iOS";
   if (name.includes("mac")) return "Apple / macOS";
-  if (name.includes("pixel") || name.includes("android")) return "Google / Android";
+  if (/pixel|android|oppo|oneplus|realme|vivo|galaxy/.test(name)) return "Android 移动设备";
   if (name.includes("ps5") || name.includes("playstation")) return "Sony PlayStation";
   if (name.includes("tv") || name.includes("电视")) return "Smart TV";
   if (name.includes("desktop") || name.includes("windows")) return "Microsoft Windows";
@@ -928,13 +931,13 @@ async function rotateRemotePassword(mac) {
 
 function renderSystem() {
   const healthy = Boolean(state.status.singbox_running);
-  $("#system-version").textContent = state.status.version || "0.3.0-rc8";
+  $("#system-version").textContent = state.status.version || "1.0.0";
   $("#system-model").textContent = state.status.model || "x86-64";
   $("#system-kernel").textContent = state.status.kernel || "—";
   $("#system-core").textContent = healthy ? "运行正常" : "未运行";
   $("#sidebar-core-text").textContent = healthy ? "系统运行正常" : "代理核心异常";
   $("#sidebar-uptime").textContent = formatUptime(state.status.uptime);
-  $("#sidebar-version").textContent = state.status.version || "0.3.0-rc8";
+  $("#sidebar-version").textContent = state.status.version || "1.0.0";
   $("#sidebar-kernel").textContent = state.status.kernel || "—";
   ["#global-health", "#system-health-pill"].forEach((selector) => {
     const pill = $(selector);

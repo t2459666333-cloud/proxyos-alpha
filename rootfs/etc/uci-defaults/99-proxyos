@@ -94,6 +94,7 @@ uci add_list dhcp.lan.dhcp_option='6,192.168.10.1'
 uci set dhcp.lan.ra='disabled'
 uci set dhcp.lan.dhcpv6='disabled'
 uci set dhcp.lan.ndp='disabled'
+uci set dhcp.@dnsmasq[0].dhcpscript='/usr/libexec/proxyos/proxyos-dhcp-event'
 uci commit dhcp
 uci -q delete network.wan6
 uci set network.lan.delegate='0'
@@ -122,6 +123,12 @@ uci commit wireless
 /etc/init.d/proxyos-port-detect enable
 /etc/init.d/proxyos-platform-doctor enable
 /etc/init.d/proxyos-lan-watch enable
+/etc/init.d/lldpd enable >/dev/null 2>&1 || true
+/etc/init.d/usteer enable >/dev/null 2>&1 || true
+/etc/init.d/umdns enable >/dev/null 2>&1 || true
+/etc/init.d/lldpd restart >/dev/null 2>&1 || true
+/etc/init.d/usteer restart >/dev/null 2>&1 || true
+/etc/init.d/umdns restart >/dev/null 2>&1 || true
 /etc/init.d/rpcd reload >/dev/null 2>&1 || true
 
 exit 0

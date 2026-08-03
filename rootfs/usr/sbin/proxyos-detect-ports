@@ -6,7 +6,7 @@ DONE_FILE="$STATE_DIR/port-role-detected"
 LOCK_DIR="/var/lock/proxyos-port-detect.lock"
 PROBE_HOOK="/usr/libexec/proxyos-udhcpc-probe"
 PROBE_TIMEOUT="${PROXYOS_PROBE_TIMEOUT:-6}"
-DEFAULT_LAN_IP="${PROXYOS_LAN_IP:-192.168.8.1}"
+DEFAULT_LAN_IP="${PROXYOS_LAN_IP:-192.168.10.1}"
 
 log() {
 	logger -t "$TAG" "$*"

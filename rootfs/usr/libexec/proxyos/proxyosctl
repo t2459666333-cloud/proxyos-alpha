@@ -6,7 +6,7 @@ NODES_FILE="${STATE_DIR}/nodes.json"
 DEVICES_FILE="${STATE_DIR}/devices.json"
 PRESENCE_STATE_FILE="${STATE_DIR}/device-presence.json"
 PRESENCE_FILE="/tmp/proxyos/device-presence.json"
-EXTERNAL_CLIENT_ONLINE_GRACE="${PROXYOS_EXTERNAL_CLIENT_ONLINE_GRACE:-10}"
+EXTERNAL_CLIENT_ONLINE_GRACE="${PROXYOS_EXTERNAL_CLIENT_ONLINE_GRACE:-60}"
 SUBSCRIPTIONS_FILE="${STATE_DIR}/subscriptions.json"
 REMOTE_ACCESS_FILE="${STATE_DIR}/remote-access.json"
 TUNNEL_FILE="${STATE_DIR}/tunnel.json"
@@ -22,7 +22,7 @@ VERSION_FILE="${STATE_DIR}/version"
 TAILSCALE_SOCKET="/var/run/tailscale/tailscaled.sock"
 
 proxyos_version() {
-	cat "$VERSION_FILE" 2>/dev/null || printf '0.3.0-rc8'
+	cat "$VERSION_FILE" 2>/dev/null || printf '1.0.0'
 }
 
 json_error() {
@@ -255,7 +255,7 @@ devices() {
 		jq -r '.l3_device // .device // "br-lan"' 2>/dev/null || printf 'br-lan')"
 	: > "$tmp_discovered"
 	case "$EXTERNAL_CLIENT_ONLINE_GRACE" in
-		*[!0-9]*|'') EXTERNAL_CLIENT_ONLINE_GRACE=10 ;;
+		*[!0-9]*|'') EXTERNAL_CLIENT_ONLINE_GRACE=60 ;;
 	esac
 
 	if [ -r /tmp/dhcp.leases ]; then
@@ -285,7 +285,9 @@ devices() {
 					connection:"wifi",
 					band:$band,
 					signal:(.value.signal // null),
-					online:true
+					online:true,
+					status_source:"hostapd",
+					status_accuracy:"exact"
 				}
 			' >> "$tmp_discovered" || true
 	done
@@ -293,10 +295,11 @@ devices() {
 	# Merge clients learned behind external APs and bridge-mode routers. NAT
 	# clients cannot be enumerated because their MAC addresses never reach us.
 	if [ -r /tmp/proxyos/lan-devices ]; then
-		while IFS="	" read -r mac ip hostname ap_port activity_age; do
+		while IFS="	" read -r mac ip hostname ap_port activity_age presence_source; do
 			[ -n "${mac:-}" ] && [ -n "${ap_port:-}" ] || continue
 			mac_lower="$(printf '%s' "$mac" | tr 'A-F' 'a-f')"
 			device_role="$(awk -v mac="$mac_lower" 'tolower($1) == mac { print $2; exit }' /tmp/proxyos/lan-device-types 2>/dev/null)"
+			remembered_role="$(awk -v p="$ap_port" '$1 == p { if ($3 == "router") print "router"; else print "access_point"; exit }' /etc/proxyos/ap-ports 2>/dev/null)"
 			connection_type=""
 			if [ "$device_role" = "access_point" ]; then
 				connection_type="external_ap_device"
@@ -306,12 +309,16 @@ devices() {
 				connection_type="wifi_external_ap"
 			elif awk -v port="$ap_port" '$3 == port && $2 == "router" { found=1 } END { exit !found }' /tmp/proxyos/lan-device-types 2>/dev/null; then
 				connection_type="wifi_external_router"
+			elif [ "$remembered_role" = "access_point" ]; then
+				connection_type="wifi_external_ap"
+			elif [ "$remembered_role" = "router" ]; then
+				connection_type="wifi_external_router"
 			elif awk -v port="$ap_port" '$1 == port && ($4 == "name-match" || $4 == "configured-ap" || $4 == "inferred-ap") { found=1 } END { exit !found }' /tmp/proxyos/ap-devices 2>/dev/null; then
 				connection_type="wifi_external_ap"
 			elif awk -v port="$ap_port" '$1 == port && $4 == "ap-or-switch" { found=1 } END { exit !found }' /tmp/proxyos/ap-devices 2>/dev/null; then
 				connection_type="lan_bridge_downstream"
 			else
-				continue
+				connection_type="lan"
 			fi
 			if [ "${hostname:--}" = "-" ] || [ "${hostname:-*}" = "*" ]; then
 				case "$device_role" in
@@ -326,25 +333,32 @@ devices() {
 					[ "$(cat "/sys/class/net/${ap_port}/carrier" 2>/dev/null || true)" = "1" ] && online_state=true
 					;;
 				*)
-					case "${activity_age:-999999}" in *[!0-9]*|'') activity_age=999999 ;; esac
-					# Bridged APs do not expose association state. Phones become
-					# quiet while locked, so keep a recently learned FDB client
-					# online for a short configurable grace period.
-					[ "$activity_age" -le "$EXTERNAL_CLIENT_ONLINE_GRACE" ] && online_state=true
+			case "${activity_age:-999999}" in *[!0-9]*|'') activity_age=999999 ;; esac
+			case "$presence_source" in arp_probe) ;; *) presence_source="bridge_activity" ;; esac
+					if [ "$connection_type" = "lan" ] && \
+					   [ "$(cat "/sys/class/net/${ap_port}/carrier" 2>/dev/null || true)" = "1" ]; then
+						online_state=true
+					else
+						# External bridge clients have no universal association API.
+						# Their configured one-minute activity threshold is independent
+						# from the longer FDB topology lifetime.
+						[ "$activity_age" -le "$EXTERNAL_CLIENT_ONLINE_GRACE" ] && online_state=true
+					fi
 					;;
 			esac
 			device_type="${device_role:-external_client}"
 			case "$(printf '%s' "$hostname" | tr 'A-Z' 'a-z')" in
 				*router*|*gateway*|*路由*) device_type="router" ;;
 				*external-ap*|*access-point*|*unifi*|*omada*|*wireless-ap*|*wifi-ap*) device_type="access_point" ;;
-				*iphone*|*ipad*|*ios*|*android*|*pixel*|*phone*|*手机*) device_type="phone" ;;
+				*iphone*|*ipad*|*ios*|*android*|*pixel*|*phone*|*oppo*|*oneplus*|*realme*|*vivo*|*galaxy*|*手机*) device_type="phone" ;;
 				*desktop*|*laptop*|*macbook*|*computer*|*电脑*) device_type="computer" ;;
 			esac
 			jq -nc --arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" \
 				--arg ip "${ip:--}" --arg name "${hostname:-External AP device}" \
 				--arg port "$ap_port" --arg connection "$connection_type" --arg type "$device_type" \
+				--arg presence_source "$presence_source" \
 				--argjson online "$online_state" \
-				'{mac:$mac,ip:(if $ip=="-" then "" else $ip end),name:$name,connection:$connection,type:$type,band:(if $connection=="wifi_external_ap" then "经外接 AP" elif $connection=="wifi_external_router" then "经外接路由器" elif $connection=="external_ap_device" then "AP 本体" elif $connection=="external_router_device" then "路由器本体" else "桥接下游" end),ap_port:$port,detection:"bridge-fdb",online:$online}' \
+				'{mac:$mac,ip:(if $ip=="-" then "" else $ip end),name:$name,connection:$connection,type:$type,band:(if $connection=="wifi_external_ap" then "经外接 AP" elif $connection=="wifi_external_router" then "经外接路由器" elif $connection=="external_ap_device" then "AP 本体" elif $connection=="external_router_device" then "路由器本体" elif $connection=="lan" then "有线 LAN" else "桥接下游" end),ap_port:$port,physical_port:$port,detection:"bridge-fdb",online:$online,status_source:(if $connection=="lan" or $connection=="external_ap_device" or $connection=="external_router_device" then "carrier" else $presence_source end),status_accuracy:(if $connection=="lan" or $connection=="external_ap_device" or $connection=="external_router_device" then "physical" elif $presence_source=="arp_probe" then "observed" else "estimated" end)}' \
 				>> "$tmp_discovered"
 		done < /tmp/proxyos/lan-devices
 	fi
@@ -352,18 +366,40 @@ devices() {
 	# A confirmed AP remains physically connected even when its management MAC
 	# is quiet and ages out of the bridge FDB. Synthesize its infrastructure
 	# record from the remembered AP identity and the port carrier, keeping AP
-	# status independent from the ten-second client activity rule.
+	# status independent from the one-minute client activity rule.
 	if [ -r /etc/proxyos/ap-ports ]; then
-		while read -r ap_port ap_mac rest; do
+		while read -r ap_port ap_mac infrastructure_role rest; do
 			[ -n "${ap_port:-}" ] && [ -n "${ap_mac:-}" ] || continue
+			case "$infrastructure_role" in access_point|router) ;; *) infrastructure_role="access_point" ;; esac
 			ap_online=false
 			[ "$(cat "/sys/class/net/${ap_port}/carrier" 2>/dev/null || true)" = "1" ] && ap_online=true
 			jq -nc \
 				--arg mac "$(printf '%s' "$ap_mac" | tr 'a-f' 'A-F')" \
-				--arg port "$ap_port" --argjson online "$ap_online" \
-				'{mac:$mac,name:"AP",connection:"external_ap_device",type:"access_point",band:"AP 本体",ap_port:$port,physical_port:$port,detection:"remembered-ap",online:$online}' \
+				--arg port "$ap_port" --arg role "$infrastructure_role" --argjson online "$ap_online" \
+				'{mac:$mac,name:(if $role=="router" then "外接路由器" else "AP" end),connection:(if $role=="router" then "external_router_device" else "external_ap_device" end),type:$role,band:(if $role=="router" then "路由器本体" else "AP 本体" end),ap_port:$port,physical_port:$port,detection:"remembered-infrastructure",online:$online,status_source:"carrier",status_accuracy:"physical"}' \
 				>> "$tmp_discovered"
 		done < /etc/proxyos/ap-ports
+	fi
+
+	# Prefer OpenWrt's maintained usteer association data whenever it is
+	# available. It reports the real connected flag for local and cooperating
+	# remote OpenWrt APs, so locked clients stay online and disassociation is
+	# reflected without relying on traffic heuristics.
+	if ubus list usteer 2>/dev/null | grep -qx usteer; then
+		ubus call usteer get_clients 2>/dev/null | jq -c '
+			to_entries[] as $client |
+			([$client.value | to_entries[] | select(.value.connected == true)] | first) as $association |
+			select($association != null) |
+			{
+				mac:($client.key | ascii_upcase),
+				connection:(if ($association.key | contains("#")) then "wifi_external_ap" else "wifi" end),
+				band:(if ($association.key | contains("#")) then "OpenWrt 外接 AP" else "Wi-Fi" end),
+				signal:($association.value.signal // null),
+				online:true,
+				status_source:"usteer",
+				status_accuracy:"exact"
+			}
+		' >> "$tmp_discovered" || true
 	fi
 
 	if [ -r /tmp/proxyos/lan-device-types ]; then
@@ -375,24 +411,59 @@ devices() {
 		done < /tmp/proxyos/lan-device-types
 	fi
 
+	# The identity engine combines DHCP fingerprints, mDNS services, LLDP,
+	# topology, and saved profiles.  Confidence is exposed to the UI/API so an
+	# unknown randomized-MAC client is never presented as a confidently detected
+	# computer or AP.
+	if [ -r /tmp/proxyos/device-identities ]; then
+		while IFS="	" read -r mac device_type identity_confidence identity_evidence identity_name; do
+			[ -n "${mac:-}" ] && [ -n "${device_type:-}" ] || continue
+			case "$identity_confidence" in *[!0-9]*|'') identity_confidence=0 ;; esac
+			if [ -n "${identity_name:-}" ] && [ "$identity_name" != "-" ] && [ "$identity_name" != "*" ] && [ "$identity_name" != "device" ]; then
+				jq -nc --arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" \
+					--arg type "$device_type" --arg name "$identity_name" --arg evidence "$identity_evidence" \
+					--argjson confidence "$identity_confidence" \
+					'{mac:$mac,type:$type,name:$name,detection:$evidence,identity_confidence:$confidence}' >> "$tmp_discovered"
+			else
+				jq -nc --arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" \
+					--arg type "$device_type" --arg evidence "$identity_evidence" \
+					--argjson confidence "$identity_confidence" \
+					'{mac:$mac,type:$type,detection:$evidence,identity_confidence:$confidence}' >> "$tmp_discovered"
+			fi
+		done < /tmp/proxyos/device-identities
+	fi
+
 	ip neigh show dev "$lan_device" 2>/dev/null |
 	awk '
-		/lladdr/ && ($NF == "REACHABLE" || $NF == "DELAY" || $NF == "PROBE" || $NF == "PERMANENT") {
+		/lladdr/ && $NF != "FAILED" && $NF != "INCOMPLETE" {
 			for (i = 1; i <= NF; i++) {
 				if ($i == "lladdr" && (i + 1) <= NF) {
-					print $1, $(i + 1)
+					print $1, $(i + 1), $NF
 					break
 				}
 			}
 		}
 	' |
-	while read -r ip mac; do
+	while read -r ip mac neighbour_state; do
 		[ -n "${mac:-}" ] || continue
 		case "$ip" in *:*) continue ;; esac
-		jq -nc \
-			--arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" \
-			--arg ip "$ip" \
-			'{mac:$mac,ip:$ip,online:true}' >> "$tmp_discovered"
+		mac_lower="$(printf '%s' "$mac" | tr 'A-F' 'a-f')"
+		# Do not let neighbour reachability override the authoritative status
+		# already derived from FDB activity, physical carrier, hostapd, or usteer.
+		# STALE entries still provide a useful current IP but are not proof that a
+		# device is online.
+		if awk -v wanted="$mac_lower" 'tolower($1) == wanted { found=1 } END { exit !found }' /tmp/proxyos/lan-devices 2>/dev/null ||
+		   jq -e --arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" 'select(.mac == $mac and (.status_source // "") != "")' "$tmp_discovered" >/dev/null 2>&1; then
+			jq -nc --arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" --arg ip "$ip" \
+				'{mac:$mac,ip:$ip}' >> "$tmp_discovered"
+		elif [ "$neighbour_state" = "REACHABLE" ] || [ "$neighbour_state" = "DELAY" ] ||
+		     [ "$neighbour_state" = "PROBE" ] || [ "$neighbour_state" = "PERMANENT" ]; then
+			jq -nc --arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" --arg ip "$ip" \
+				'{mac:$mac,ip:$ip,online:true,status_source:"neighbor",status_accuracy:"observed"}' >> "$tmp_discovered"
+		else
+			jq -nc --arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" --arg ip "$ip" \
+				'{mac:$mac,ip:$ip}' >> "$tmp_discovered"
+		fi
 	done
 
 	if [ -s "$tmp_discovered" ]; then
@@ -441,6 +512,8 @@ devices() {
 								(. * $live) |
 								if ($saved_device.custom_name // false)
 								then .name = $saved_device.name | .custom_name = true
+								elif (($live.name // "") == "" or ($live.name // "") == "Unknown device") and (($saved_device.name // "") != "")
+								then .name = $saved_device.name
 								else . end
 							else . end
 						)
@@ -454,23 +527,33 @@ devices() {
 			) |
 			map(select(.online == true or ($now - (.last_seen // 0)) <= 604800)) |
 			map(
+				if .connection == "wifi_external_ap" then
+					([$discovered[0][] | select(.connection == "external_ap_device" and .online == true) | .ap_port // empty] | unique) as $ports |
+					if ($ports | length) == 1 then .ap_port=$ports[0] | .physical_port=$ports[0] | .band="经外接 AP" else . end
+				elif .connection == "wifi_external_router" then
+					([$discovered[0][] | select(.connection == "external_router_device" and .online == true) | .ap_port // empty] | unique) as $ports |
+					if ($ports | length) == 1 then .ap_port=$ports[0] | .physical_port=$ports[0] | .band="经外接路由器" else . end
+				else . end
+			) |
+			map(
 				if (.connection == "external_ap_device" and ((.custom_name // false) | not)) then
 					.name = "AP"
 				elif (.connection == "external_router_device" and ((.name // "") == "" or (.name // "") == "Unknown device")) then
 					.name = "外接路由器"
 				elif ((.name // "") == "" or (.name // "") == "Unknown device") then
+					(if (.ip // "") != "" then .ip else (.mac[-8:] // "未知") end) as $identity |
 					.name = (
 						if .connection == "external_ap_device" then "AP"
 						elif .connection == "external_router_device" then "外接路由器"
-						elif .connection == "wifi_external_ap" then "AP 无线终端 · " + (.ip // (.mac[-8:]))
-						elif .connection == "wifi_external_router" then "路由器无线终端 · " + (.ip // (.mac[-8:]))
-						elif .connection == "wifi" then "无线终端 · " + (.ip // (.mac[-8:]))
-						else "局域网设备 · " + (.ip // (.mac[-8:])) end
+						elif .connection == "wifi_external_ap" then "无线设备 · " + $identity
+						elif .connection == "wifi_external_router" then "无线设备 · " + $identity
+						elif .connection == "wifi" then "无线设备 · " + $identity
+						else "局域网设备 · " + $identity end
 					)
 				else . end |
 				(.name // "" | ascii_downcase) as $n |
 				if (.type // "") != "" then .
-				elif ($n|contains("iphone")) or ($n|contains("android")) or ($n|contains("phone")) or ($n|contains("手机")) then .type="phone"
+				elif ($n|contains("iphone")) or ($n|contains("ipad")) or ($n|contains("ios")) or ($n|contains("android")) or ($n|contains("pixel")) or ($n|contains("phone")) or ($n|contains("oppo")) or ($n|contains("oneplus")) or ($n|contains("realme")) or ($n|contains("vivo")) or ($n|contains("galaxy")) or ($n|contains("手机")) then .type="phone"
 				elif ($n|contains("desktop")) or ($n|contains("laptop")) or ($n|contains("macbook")) or ($n|contains("computer")) or ($n|contains("电脑")) then .type="computer"
 				elif ($n|contains("router")) or ($n|contains("gateway")) or ($n|contains("路由")) then .type="router"
 				elif ($n|contains("access-point")) or ($n|contains("external-ap")) or ($n|contains("unifi")) or ($n|contains("omada")) or ($n|contains("wifi-ap")) then .type="access_point"
@@ -1252,7 +1335,7 @@ device_bind() {
 	case "$auto_source" in all|manual|subscription) ;; *) json_error "Invalid automatic-node source" ;; esac
 	case "$custom_name" in true|false) ;; *) json_error "Invalid custom-name flag" ;; esac
 	case "$connection" in ''|lan|wifi|wifi_external_ap|wifi_external_router|external_ap_device|external_router_device|router_downstream|lan_bridge_downstream) ;; *) json_error "Invalid device connection type" ;; esac
-	case "$device_type" in computer|phone|other|external_client|access_point|router) ;; *) device_type="other" ;; esac
+	case "$device_type" in computer|phone|other|external_client|downstream_device|access_point|router) ;; *) device_type="other" ;; esac
 	if [ "$policy" = "fixed_node" ]; then
 		jq -e --arg id "$node_id" 'any(.[]; .id == $id)' "$NODES_FILE" >/dev/null ||
 			json_error "Selected node does not exist"
@@ -2485,7 +2568,7 @@ policy_apply() {
 
 backup_create() {
 	archive="/tmp/proxyos-backup.$$.tar.gz"
-	files="etc/proxyos/nodes.json etc/proxyos/devices.json etc/proxyos/subscriptions.json etc/proxyos/remote-access.json etc/proxyos/config-template.json etc/config/proxyos etc/config/network etc/config/dhcp etc/config/wireless etc/config/firewall"
+	files="etc/proxyos/nodes.json etc/proxyos/devices.json etc/proxyos/device-identities etc/proxyos/subscriptions.json etc/proxyos/remote-access.json etc/proxyos/config-template.json etc/config/proxyos etc/config/network etc/config/dhcp etc/config/wireless etc/config/firewall"
 	(
 		cd /
 		existing=""

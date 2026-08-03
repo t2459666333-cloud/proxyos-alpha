@@ -5,9 +5,16 @@ STATE_FILE="/etc/proxyos/port-role-detected"
 DEVICE_FILE="/tmp/proxyos/lan-devices"
 AP_FILE="/tmp/proxyos/ap-devices"
 TYPE_FILE="/tmp/proxyos/lan-device-types"
+IDENTITY_FILE="/tmp/proxyos/device-identities"
+MDNS_FILE="/tmp/proxyos/mdns-identities"
+DHCP_FINGERPRINT_FILE="/tmp/proxyos/dhcp-fingerprints"
+LEARNED_IDENTITY_FILE="/etc/proxyos/device-identities"
 TOPOLOGY_FILE="/tmp/proxyos/lan-topology"
 KNOWN_AP_FILE="/etc/proxyos/ap-ports"
+ARP_PRESENCE_FILE="/tmp/proxyos/arp-presence"
 INTERVAL="${PROXYOS_LAN_SCAN_INTERVAL:-2}"
+OFFLINE_GRACE="${PROXYOS_EXTERNAL_CLIENT_ONLINE_GRACE:-60}"
+case "$OFFLINE_GRACE" in *[!0-9]*|'') OFFLINE_GRACE=60 ;; esac
 
 log() {
 	logger -t "$TAG" "$*"
@@ -23,9 +30,11 @@ ensure_lan_ports() {
 	lan_ports="$(state_value lan)"
 	[ -n "$lan_ports" ] || lan_ports="$(uci -q get network.br_lan.ports)"
 	[ -d /sys/class/net/br-lan ] || return 0
-	# Keep quiet, locked mobile clients in the bridge FDB long enough for the
-	# controller's external-client presence grace period.
-	ip link set dev br-lan type bridge ageing_time 1000 2>/dev/null || true
+	# Keep topology identity independent from the UI online threshold. The
+	# controller uses activity_age for its one-minute client status, while the
+	# normal five-minute FDB lifetime prevents connection type and port from
+	# disappearing whenever a client becomes quiet.
+	ip link set dev br-lan type bridge ageing_time 30000 2>/dev/null || true
 
 	for port in $lan_ports; do
 		[ "$port" = "$wan" ] && continue
@@ -41,6 +50,230 @@ ensure_lan_ports() {
 lease_for_mac() {
 	local wanted="$1"
 	awk -v mac="$wanted" 'tolower($2) == mac { print $3 "\t" $4; exit }' /tmp/dhcp.leases 2>/dev/null
+}
+
+neighbour_ipv4_for_mac() {
+	local wanted="$1"
+	ip neigh show dev br-lan 2>/dev/null | awk -v mac="$wanted" '
+		$1 !~ /:/ && $0 ~ /lladdr/ && $NF != "FAILED" && $NF != "INCOMPLETE" {
+			for (i=1; i<=NF; i++) {
+				if ($i == "lladdr" && tolower($(i+1)) == mac) { print $1; exit }
+			}
+		}'
+}
+
+refresh_mdns_identities() {
+	local tmp="${MDNS_FILE}.$$"
+	: > "$tmp"
+	if ubus list umdns 2>/dev/null | grep -qx umdns; then
+		ubus call umdns browse '{"array":true,"address":true}' 2>/dev/null | jq -r '
+			def values_array:
+				if type == "array" then .
+				elif . == null or . == "" then []
+				else [.] end;
+			to_entries[] as $service |
+			$service.value | to_entries[] | .value as $record |
+			($record.ipv4 | values_array[]) as $ip |
+			(($record.host // "") | sub("[.]local[.]?$"; "")) as $name |
+			($service.key | ascii_downcase) as $protocol |
+			($name | ascii_downcase) as $lower_name |
+			(if ($protocol | contains("apple-mobdev2")) then ["phone",95]
+			 elif ($lower_name | test("iphone|ipad|ios|android|pixel|phone|oppo|oneplus|realme|vivo|galaxy")) then ["phone",92]
+			 elif ($lower_name | test("desktop|laptop|macbook|computer|windows")) then ["computer",90]
+			 elif ($lower_name | test("router|gateway")) then ["router",92]
+			 elif ($lower_name | test("access-point|wireless-ap|wifi-ap|unifi|omada")) then ["access_point",92]
+			 elif ($protocol | test("_workstation[.]|_smb[.]|_rdp[.]")) then ["computer",72]
+			 else ["other",40] end) as $identity |
+			[$ip,$name,$identity[0],("mdns:" + $service.key),($identity[1] | tostring)] | @tsv
+		' 2>/dev/null | sort -t "$(printf '\t')" -k1,1 -k5,5nr | awk -F '\t' '!seen[$1]++' > "$tmp" || true
+	fi
+	mv "$tmp" "$MDNS_FILE"
+}
+
+mdns_for_ip() {
+	awk -F '\t' -v wanted="$1" '$1 == wanted { print $2 "\t" $3 "\t" $4 "\t" $5; exit }' "$MDNS_FILE" 2>/dev/null
+}
+
+dhcp_type_for_mac() {
+	local fingerprint lower
+	fingerprint="$(awk -F '\t' -v wanted="$1" 'tolower($1) == wanted { print $4 " " $5 " " $6; exit }' "$DHCP_FINGERPRINT_FILE" 2>/dev/null)"
+	lower="$(printf '%s' "$fingerprint" | tr 'A-Z' 'a-z')"
+	case "$lower" in
+		*android*) printf 'phone\tdhcp-fingerprint\t90\n' ;;
+		*msft*|*windows*|*pxeclient*) printf 'computer\tdhcp-fingerprint\t88\n' ;;
+	esac
+}
+
+learned_identity_for_mac() {
+	local wanted="$1" now
+	now="$(date +%s)"
+	awk -F '\t' -v mac="$wanted" -v now="$now" '
+		tolower($1) == mac && (now - ($6 + 0)) <= 2592000 {
+			print $2 "\t" $3 "\tlearned:" $4 "\t" $5
+			exit
+		}' "$LEARNED_IDENTITY_FILE" 2>/dev/null
+}
+
+remember_device_identity() {
+	local mac="$1" type="$2" confidence="$3" evidence="$4" name="$5" now existing_timestamp
+	case "$type" in phone|computer) ;; *) return 0 ;; esac
+	case "$confidence" in *[!0-9]*|'') return 0 ;; esac
+	[ "$confidence" -ge 85 ] || return 0
+	case "$name" in ''|-|'*'|device|'Unknown device') return 0 ;; esac
+	now="$(date +%s)"
+	existing_timestamp="$(awk -F '\t' -v wanted="$mac" 'tolower($1) == wanted { print $6; exit }' "$LEARNED_IDENTITY_FILE" 2>/dev/null)"
+	case "$existing_timestamp" in *[!0-9]*|'') existing_timestamp=0 ;; esac
+	if awk -F '\t' -v wanted="$mac" -v type="$type" -v confidence="$confidence" -v name="$name" '
+		tolower($1) == wanted && $2 == type && $3 == confidence && $5 == name { found=1 }
+		END { exit !found }
+	' "$LEARNED_IDENTITY_FILE" 2>/dev/null && [ $((now - existing_timestamp)) -lt 86400 ]; then
+		return 0
+	fi
+	awk -F '\t' -v wanted="$mac" -v now="$now" '
+		tolower($1) != wanted && (now - ($6 + 0)) <= 2592000
+	' "$LEARNED_IDENTITY_FILE" 2>/dev/null > "${LEARNED_IDENTITY_FILE}.tmp"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$mac" "$type" "$confidence" "$evidence" "$name" "$now" >> "${LEARNED_IDENTITY_FILE}.tmp"
+	mv "${LEARNED_IDENTITY_FILE}.tmp" "$LEARNED_IDENTITY_FILE"
+	chmod 0600 "$LEARNED_IDENTITY_FILE"
+}
+
+lldp_port_role() {
+	local text
+	command -v lldpcli >/dev/null 2>&1 || return 0
+	text="$(lldpcli -f keyvalue show neighbors ports "$1" details 2>/dev/null | tr 'A-Z' 'a-z')"
+	case "$text" in
+		*access-point*|*access_point*|*wireless*|*wi-fi*|*wifi*|*wlan*) printf 'access_point\n' ;;
+		*router*|*gateway*) printf 'router\n' ;;
+		*switch*|*bridge*) printf 'switch\n' ;;
+	esac
+}
+
+lldp_port_mac() {
+	command -v lldpcli >/dev/null 2>&1 || return 0
+	lldpcli -f keyvalue show neighbors ports "$1" details 2>/dev/null |
+		sed -n 's/^[^.]*\.[^.]*\.chassis\.mac=//p' | tr 'A-F' 'a-f' | head -n 1
+}
+
+remember_infrastructure() {
+	local port="$1" mac="$2" role="${3:-access_point}"
+	printf '%s' "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || return 0
+	case "$role" in access_point|router) ;; *) return 0 ;; esac
+	if ! awk -v p="$port" -v m="$mac" -v r="$role" '
+		tolower($1) == tolower(p) && tolower($2) == tolower(m) && (($3 == "" && r == "access_point") || $3 == r) { found=1 }
+		END { exit !found }
+	' "$KNOWN_AP_FILE" 2>/dev/null; then
+		awk -v p="$port" '$1 != p' "$KNOWN_AP_FILE" 2>/dev/null > "${KNOWN_AP_FILE}.tmp"
+		printf '%s\t%s\t%s\n' "$port" "$mac" "$role" >> "${KNOWN_AP_FILE}.tmp"
+		mv "${KNOWN_AP_FILE}.tmp" "$KNOWN_AP_FILE"
+		chmod 0600 "$KNOWN_AP_FILE"
+	fi
+}
+
+probe_external_clients() {
+	local devices_file="$1" types_file="$2" ap_file="$3"
+	local probe_dir result_dir candidates probe_count=0 mac ip hostname port activity_age presence_source
+	local device_role result probe_tmp now saved_port saved_connection expected_role candidate_port
+	command -v arping >/dev/null 2>&1 || return 0
+	probe_dir="$(mktemp -d /tmp/proxyos-arp-probe.XXXXXX)" || return 0
+	result_dir="$probe_dir/results"
+	candidates="$probe_dir/candidates"
+	mkdir "$result_dir"
+	cp "$devices_file" "$candidates"
+	now="$(date +%s)"
+	touch "$ARP_PRESENCE_FILE"
+
+	# A reboot clears the kernel FDB. Seed recent, previously classified
+	# external wireless clients as probe-only candidates so a locked device can
+	# reappear without first generating application traffic. A successful reply
+	# learns the real bridge port; old profile data alone never marks it online.
+	if [ -s /etc/proxyos/devices.json ]; then
+		jq -r --argjson now "$now" '.[] |
+			select((.connection == "wifi_external_ap" or .connection == "wifi_external_router") and
+				(.ip // "") != "" and ($now - (.last_seen // 0)) <= 604800) |
+			[.mac,.ip,(.name // "Unknown device"),(.ap_port // ""),.connection] | @tsv
+		' /etc/proxyos/devices.json 2>/dev/null |
+		while IFS="	" read -r mac ip hostname saved_port saved_connection; do
+			awk -v m="$mac" 'tolower($1) == tolower(m) { found=1 } END { exit !found }' "$candidates" 2>/dev/null && continue
+			case "$saved_connection" in
+				wifi_external_router) expected_role="router" ;;
+				*) expected_role="access_point" ;;
+			esac
+			port=""
+			if awk -v p="$saved_port" -v r="$expected_role" '$1 == p && (($3 == "" && r == "access_point") || $3 == r) { found=1 } END { exit !found }' "$KNOWN_AP_FILE" 2>/dev/null &&
+			   [ "$(cat "/sys/class/net/${saved_port}/carrier" 2>/dev/null)" = "1" ]; then
+				port="$saved_port"
+			else
+				for candidate_port in $(awk -v r="$expected_role" '(($3 == "" && r == "access_point") || $3 == r) { print $1 }' "$KNOWN_AP_FILE" 2>/dev/null); do
+					if [ "$(cat "/sys/class/net/${candidate_port}/carrier" 2>/dev/null)" = "1" ]; then
+						port="$candidate_port"
+						break
+					fi
+				done
+			fi
+			[ -n "$port" ] || continue
+			printf '%s\t%s\t%s\t%s\t999999\tsaved_profile\n' "$(printf '%s' "$mac" | tr 'A-F' 'a-f')" "$ip" "$hostname" "$port" >> "$candidates"
+		done
+	fi
+
+	# Phones may stop normal traffic while locked but often still answer ARP or
+	# ICMP. Probe only quiet downstream clients and cap concurrency
+	# so large networks cannot delay the two-second topology watcher indefinitely.
+	while IFS="	" read -r mac ip hostname port activity_age presence_source; do
+		case "$ip" in ''|-|*[!0-9.]*) continue ;; esac
+		case "$activity_age" in *[!0-9]*|'') continue ;; esac
+		[ "$activity_age" -ge 8 ] || continue
+		device_role="$(awk -v m="$mac" 'tolower($1) == tolower(m) { print $2; exit }' "$types_file" 2>/dev/null)"
+		case "$device_role" in access_point|router) continue ;; esac
+		if ! awk -v p="$port" '$1 == p { found=1 } END { exit !found }' "$KNOWN_AP_FILE" 2>/dev/null &&
+		   ! awk -v p="$port" '$3 == p && ($2 == "access_point" || $2 == "router") { found=1 } END { exit !found }' "$types_file" 2>/dev/null &&
+		   ! awk -v p="$port" '$1 == p && ($4 == "ap-or-switch" || $4 == "name-match" || $4 == "inferred-ap" || $4 == "configured-ap" || $4 == "configured-router" || $4 == "lldp-ap") { found=1 } END { exit !found }' "$ap_file" 2>/dev/null; then
+			continue
+		fi
+		(
+			probe_key="$(printf '%s' "$mac" | tr -d ':')"
+			(arping -q -f -c 3 -w 2 -I br-lan "$ip" >/dev/null 2>&1 && : > "$result_dir/${probe_key}.arp") &
+			arp_pid="$!"
+			(ping -q -c 2 -W 1 -I br-lan "$ip" >/dev/null 2>&1 && : > "$result_dir/${probe_key}.ping") &
+			ping_pid="$!"
+			wait "$arp_pid" 2>/dev/null || true
+			wait "$ping_pid" 2>/dev/null || true
+			if [ -e "$result_dir/${probe_key}.arp" ] || [ -e "$result_dir/${probe_key}.ping" ]; then
+				printf '%s\n' "$mac" > "$result_dir/${probe_key}"
+			fi
+			rm -f "$result_dir/${probe_key}.arp" "$result_dir/${probe_key}.ping"
+		) &
+		probe_count=$((probe_count + 1))
+		[ "$probe_count" -lt 32 ] || break
+	done < "$candidates"
+	[ "$probe_count" -eq 0 ] || wait
+
+	for result in "$result_dir"/*; do
+		[ -f "$result" ] || continue
+		mac="$(cat "$result" 2>/dev/null)"
+		[ -n "$mac" ] || continue
+		if ! awk -v m="$mac" 'tolower($1) == tolower(m) { found=1 } END { exit !found }' "$devices_file" 2>/dev/null; then
+			awk -F '	' -v OFS='	' -v wanted="$mac" '
+				tolower($1) == tolower(wanted) { $5=0; $6="arp_probe"; print; exit }
+			' "$candidates" >> "$devices_file"
+		fi
+		awk -v m="$mac" 'tolower($1) != tolower(m)' "$ARP_PRESENCE_FILE" > "${ARP_PRESENCE_FILE}.tmp"
+		printf '%s\t%s\n' "$mac" "$now" >> "${ARP_PRESENCE_FILE}.tmp"
+		mv "${ARP_PRESENCE_FILE}.tmp" "$ARP_PRESENCE_FILE"
+	done
+	# Keep the last successful probe authoritative for the configured offline
+	# confirmation window. This
+	# absorbs isolated Wi-Fi power-save packet loss without extending a real
+	# disconnect beyond the requested grace period.
+	awk -v now="$now" 'NF >= 2 && (now - $2) <= 300' "$ARP_PRESENCE_FILE" > "${ARP_PRESENCE_FILE}.tmp"
+	mv "${ARP_PRESENCE_FILE}.tmp" "$ARP_PRESENCE_FILE"
+	probe_tmp="${devices_file}.probe"
+	awk -F '	' -v OFS='	' -v now="$now" -v grace="$OFFLINE_GRACE" '
+		FILENAME == ARGV[1] { confirmed[tolower($1)]=$2; next }
+		(confirmed[tolower($1)] != "" && (now - confirmed[tolower($1)]) <= grace) { $5=0; $6="arp_probe" }
+		{ print }
+	' "$ARP_PRESENCE_FILE" "$devices_file" > "$probe_tmp"
+	mv "$probe_tmp" "$devices_file"
+	rm -rf "$probe_dir"
 }
 
 fdb_entries() {
@@ -71,15 +304,25 @@ fdb_entries() {
 scan_devices() {
 	local tmp_devices="${DEVICE_FILE}.$$" tmp_ap="${AP_FILE}.$$"
 	local tmp_types="${TYPE_FILE}.$$" tmp_topology="${TOPOLOGY_FILE}.$$"
+	local tmp_identities="${IDENTITY_FILE}.$$"
+	local tmp_inferred="${TYPE_FILE}.$$.inferred"
 	local mac port activity_age lease ip hostname count carrier device_type evidence port_type lan_ports
+	local known_signature known_role saved_profile saved_type saved_connection
+	local mdns_identity mdns_name mdns_type mdns_evidence mdns_confidence
+	local dhcp_identity dhcp_type dhcp_evidence dhcp_confidence confidence
+	local learned_identity learned_type learned_confidence learned_evidence learned_name
 	: > "$tmp_devices"
 	: > "$tmp_ap"
 	: > "$tmp_types"
+	: > "$tmp_identities"
 	: > "$tmp_topology"
+	: > "$tmp_inferred"
+	refresh_mdns_identities
 	[ -d /sys/class/net/br-lan ] || {
 		mv "$tmp_devices" "$DEVICE_FILE"
 		mv "$tmp_ap" "$AP_FILE"
 		mv "$tmp_types" "$TYPE_FILE"
+		mv "$tmp_identities" "$IDENTITY_FILE"
 		mv "$tmp_topology" "$TOPOLOGY_FILE"
 		return
 	}
@@ -93,7 +336,18 @@ scan_devices() {
 		[ "$ip" != "$lease" ] || ip="-"
 		hostname="${lease#*	}"
 		[ "$hostname" != "$lease" ] || hostname="-"
-		printf '%s\t%s\t%s\t%s\t%s\n' "$mac" "$ip" "$hostname" "$port" "${activity_age:-999999}"
+		if [ "$ip" = "-" ]; then
+			ip="$(neighbour_ipv4_for_mac "$mac")"
+			[ -n "$ip" ] || ip="-"
+		fi
+		if [ "$ip" != "-" ]; then
+			mdns_identity="$(mdns_for_ip "$ip")"
+			mdns_name="${mdns_identity%%	*}"
+			if [ -n "$mdns_identity" ] && { [ "$hostname" = "-" ] || [ "$hostname" = "*" ] || [ "$hostname" = "device" ]; }; then
+				hostname="$mdns_name"
+			fi
+		fi
+		printf '%s\t%s\t%s\t%s\t%s\tbridge_activity\n' "$mac" "$ip" "$hostname" "$port" "${activity_age:-999999}"
 	done | sort -u > "$tmp_devices"
 
 	for port in $(awk '{print $4}' "$tmp_devices" | sort -u); do
@@ -116,44 +370,154 @@ scan_devices() {
 	while IFS="	" read -r mac ip hostname port activity_age; do
 		device_type="other"
 		evidence="unknown"
-		case "$(printf '%s' "$hostname" | tr 'A-Z' 'a-z')" in
-			*iphone*|*ipad*|*ios*|*android*|*pixel*|*phone*|*手机*) device_type="phone"; evidence="hostname" ;;
-			*desktop*|*laptop*|*macbook*|*computer*|*电脑*) device_type="computer"; evidence="hostname" ;;
-			*router*|*gateway*|*路由*) device_type="router"; evidence="hostname" ;;
-			*external-ap*|*access-point*|*unifi*|*omada*|*wireless-ap*|*wifi-ap*) device_type="access_point"; evidence="hostname" ;;
-		esac
+		confidence=0
+		mdns_identity=""
+		mdns_name=""
+		mdns_type=""
+		mdns_evidence=""
+		mdns_confidence=""
+		if [ "$ip" != "-" ]; then
+			mdns_identity="$(mdns_for_ip "$ip")"
+			if [ -n "$mdns_identity" ]; then
+				mdns_name="${mdns_identity%%	*}"
+				mdns_identity="${mdns_identity#*	}"
+				mdns_type="${mdns_identity%%	*}"
+				mdns_identity="${mdns_identity#*	}"
+				mdns_evidence="${mdns_identity%%	*}"
+				mdns_confidence="${mdns_identity#*	}"
+			fi
+		fi
+		known_signature="$(awk -v p="$port" '$1 == p { print tolower($2); exit }' "$KNOWN_AP_FILE" 2>/dev/null)"
+		known_role="$(awk -v p="$port" '$1 == p { if ($3 == "router") print "router"; else print "access_point"; exit }' "$KNOWN_AP_FILE" 2>/dev/null)"
+		if [ -n "$known_signature" ] && [ "$(printf '%s' "$mac" | tr 'A-F' 'a-f')" = "$known_signature" ]; then
+			device_type="$known_role"
+			evidence="remembered-infrastructure"
+			confidence=100
+		fi
+		if [ "$device_type" = "other" ]; then
+			case "$(printf '%s' "$hostname" | tr 'A-Z' 'a-z')" in
+				*iphone*|*ipad*|*ios*|*android*|*pixel*|*phone*|*oppo*|*oneplus*|*realme*|*vivo*|*galaxy*|*手机*) device_type="phone"; evidence="hostname"; confidence=92 ;;
+				*desktop*|*laptop*|*macbook*|*computer*|*windows*|*电脑*) device_type="computer"; evidence="hostname"; confidence=90 ;;
+				*router*|*gateway*|*路由*) device_type="router"; evidence="hostname"; confidence=92 ;;
+				*external-ap*|*access-point*|*unifi*|*omada*|*wireless-ap*|*wifi-ap*) device_type="access_point"; evidence="hostname"; confidence=92 ;;
+			esac
+		fi
+		if [ "$device_type" = "other" ] && [ -n "$mdns_type" ] && [ "$mdns_type" != "other" ]; then
+			device_type="$mdns_type"
+			evidence="$mdns_evidence"
+			confidence="${mdns_confidence:-70}"
+		fi
+		if [ "$device_type" = "other" ]; then
+			dhcp_identity="$(dhcp_type_for_mac "$mac")"
+			if [ -n "$dhcp_identity" ]; then
+				dhcp_type="${dhcp_identity%%	*}"
+				dhcp_identity="${dhcp_identity#*	}"
+				dhcp_evidence="${dhcp_identity%%	*}"
+				dhcp_confidence="${dhcp_identity#*	}"
+				device_type="$dhcp_type"
+				evidence="$dhcp_evidence"
+				confidence="${dhcp_confidence:-85}"
+			fi
+		fi
+		if [ "$device_type" = "other" ]; then
+			learned_identity="$(learned_identity_for_mac "$mac")"
+			if [ -n "$learned_identity" ]; then
+				learned_type="${learned_identity%%	*}"
+				learned_identity="${learned_identity#*	}"
+				learned_confidence="${learned_identity%%	*}"
+				learned_identity="${learned_identity#*	}"
+				learned_evidence="${learned_identity%%	*}"
+				learned_name="${learned_identity#*	}"
+				device_type="$learned_type"
+				evidence="$learned_evidence"
+				confidence="${learned_confidence:-85}"
+				case "$hostname" in ''|-|'*'|device|'Unknown device') hostname="$learned_name" ;; esac
+			fi
+		fi
+		if [ "$device_type" = "other" ] && [ -s /etc/proxyos/devices.json ]; then
+			saved_profile="$(jq -r --arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" '
+				.[] | select(.mac == $mac) | [(.type // "other"),(.connection // "")] | @tsv
+			' /etc/proxyos/devices.json 2>/dev/null | head -n 1)"
+			saved_type="${saved_profile%%	*}"
+			saved_connection="${saved_profile#*	}"
+			case "$saved_type" in
+				phone|computer)
+					device_type="$saved_type"
+					evidence="saved-profile"
+					confidence=80
+					;;
+				*)
+					case "$saved_connection" in
+						wifi_external_ap|wifi_external_router)
+							device_type="downstream_device"
+							evidence="saved-profile"
+							confidence=80
+							;;
+					esac
+					;;
+			esac
+		fi
 		count="$(awk -v p="$port" '$4 == p { n++ } END { print n+0 }' "$tmp_devices")"
 		# An AP in bridge mode often has no DHCP lease of its own while named
 		# phone/computer clients behind it are visible. This evidence is more
 		# specific than a multi-MAC port, which could be an Ethernet switch.
-		if [ "$device_type" = "other" ] && [ "$count" -ge 2 ] && [ "$ip" = "-" ] && \
-		   awk -v p="$port" 'tolower($4) == tolower(p) && tolower($3) ~ /(iphone|ipad|ios|android|pixel|phone|desktop|laptop|macbook|computer)/ { found=1 } END { exit !found }' "$tmp_devices" 2>/dev/null; then
+		if [ "$device_type" = "other" ] && [ -z "$known_role" ] && [ "$count" -ge 2 ] && [ "$ip" = "-" ] && \
+		   ! awk -v p="$port" '$1 == p { found=1 } END { exit !found }' "$tmp_inferred" 2>/dev/null && \
+		   awk -v p="$port" 'tolower($4) == tolower(p) && tolower($3) ~ /(iphone|ipad|ios|android|pixel|phone|oppo|oneplus|realme|vivo|galaxy|desktop|laptop|macbook|computer)/ { found=1 } END { exit !found }' "$tmp_devices" 2>/dev/null; then
 			device_type="access_point"
 			evidence="infrastructure-mac"
+			confidence=75
+			printf '%s\n' "$port" >> "$tmp_inferred"
 		fi
 		if [ "$device_type" = "other" ] && [ "$count" -ge 2 ]; then
 			device_type="downstream_device"
 			evidence="multi-mac-port"
+			confidence=45
 		fi
 		printf '%s\t%s\t%s\t%s\n' "$mac" "$device_type" "$port" "$evidence" >> "$tmp_types"
+		printf '%s\t%s\t%s\t%s\t%s\n' "$mac" "$device_type" "$confidence" "$evidence" "$hostname" >> "$tmp_identities"
+		case "$evidence" in learned:*|saved-profile) ;; *) remember_device_identity "$mac" "$device_type" "$confidence" "$evidence" "$hostname" ;; esac
 	done < "$tmp_devices"
+	rm -f "$tmp_inferred"
 
 	while IFS="	" read -r mac device_type port evidence; do
-		[ "$device_type" = "access_point" ] || continue
-		printf '%s\tonline\t%s\tinferred-ap\n' "$port" "$(awk -v p="$port" '$4 == p { n++ } END { print n+0 }' "$tmp_devices")" >> "$tmp_ap"
-		# Remember the AP identity so a quiet AP management MAC ageing out does
-		# not make its active wireless clients look like direct LAN endpoints.
-		if ! awk -v p="$port" -v m="$mac" 'tolower($1) == tolower(p) && tolower($2) == tolower(m) { found=1 } END { exit !found }' "$KNOWN_AP_FILE" 2>/dev/null; then
-			awk -v p="$port" '$1 != p' "$KNOWN_AP_FILE" 2>/dev/null > "${KNOWN_AP_FILE}.tmp"
-			printf '%s\t%s\n' "$port" "$mac" >> "${KNOWN_AP_FILE}.tmp"
-			mv "${KNOWN_AP_FILE}.tmp" "$KNOWN_AP_FILE"
-			chmod 0600 "$KNOWN_AP_FILE"
+		case "$device_type" in access_point|router) ;; *) continue ;; esac
+		if [ "$device_type" = "access_point" ]; then
+			printf '%s\tonline\t%s\tinferred-ap\n' "$port" "$(awk -v p="$port" '$4 == p { n++ } END { print n+0 }' "$tmp_devices")" >> "$tmp_ap"
 		fi
+		# Remember infrastructure identity so quiet management MACs do not make
+		# downstream clients change connection type between refreshes.
+		remember_infrastructure "$port" "$mac" "$device_type"
 	done < "$tmp_types"
 
-	while read -r port signature_mac rest; do
+	# LLDP/CDP is a stronger infrastructure signal than hostname guessing.
+	# Use lldpd data when the adjacent AP/router/switch publishes it.
+	lan_ports="$(state_value lan)"
+	[ -n "$lan_ports" ] || lan_ports="$(uci -q get network.br_lan.ports)"
+	for port in $lan_ports; do
+		lldp_role="$(lldp_port_role "$port")"
+		[ -n "$lldp_role" ] || continue
+		lldp_mac="$(lldp_port_mac "$port")"
+		if printf '%s' "$lldp_mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; then
+			awk -v m="$lldp_mac" 'tolower($1) != tolower(m)' "$tmp_types" > "${tmp_types}.lldp"
+			mv "${tmp_types}.lldp" "$tmp_types"
+			printf '%s\t%s\t%s\tlldp\n' "$lldp_mac" "$lldp_role" "$port" >> "$tmp_types"
+			awk -F '\t' -v m="$lldp_mac" 'tolower($1) != tolower(m)' "$tmp_identities" > "${tmp_identities}.lldp"
+			mv "${tmp_identities}.lldp" "$tmp_identities"
+			printf '%s\t%s\t100\tlldp\t-\n' "$lldp_mac" "$lldp_role" >> "$tmp_identities"
+		fi
+		if [ "$lldp_role" = "access_point" ]; then
+			printf '%s\tonline\t%s\tlldp-ap\n' "$port" "$(awk -v p="$port" '$4 == p { n++ } END { print n+0 }' "$tmp_devices")" >> "$tmp_ap"
+		fi
+		case "$lldp_role" in access_point|router) remember_infrastructure "$port" "$lldp_mac" "$lldp_role" ;; esac
+	done
+
+	known_snapshot="${KNOWN_AP_FILE}.scan.$$"
+	cp "$KNOWN_AP_FILE" "$known_snapshot" 2>/dev/null || : > "$known_snapshot"
+	while read -r port signature_mac remembered_role rest; do
 		[ -n "$port" ] && [ -n "$signature_mac" ] || continue
 		signature_mac="$(printf '%s' "$signature_mac" | tr 'A-F' 'a-f')"
+		case "$remembered_role" in access_point|router) ;; *) remembered_role="access_point" ;; esac
 		carrier="$(cat "/sys/class/net/$port/carrier" 2>/dev/null)"
 		# Preserve the remembered role while the physical link stays up. The AP
 		# management MAC and sleeping clients may both be absent from the FDB.
@@ -163,12 +527,30 @@ scan_devices() {
 			chmod 0600 "$KNOWN_AP_FILE"
 			continue
 		fi
-		[ "$carrier" = "1" ] && carrier="online"
 		count="$(awk -v p="$port" '$4 == p { n++ } END { print n+0 }' "$tmp_devices")"
+		# A remembered AP must not turn a newly attached computer into a Wi-Fi
+		# client. A single, different MAC with explicit computer/router evidence
+		# is strong replacement evidence even if the watcher missed link-down.
+		if [ "$count" -eq 1 ] &&
+		   ! awk -v p="$port" -v m="$signature_mac" 'tolower($1) == m && $4 == p { found=1 } END { exit !found }' "$tmp_devices" 2>/dev/null &&
+		   awk -v p="$port" '$3 == p && ($2 == "computer" || $2 == "router") { found=1 } END { exit !found }' "$tmp_types" 2>/dev/null; then
+			awk -v p="$port" '$1 != p' "$KNOWN_AP_FILE" > "${KNOWN_AP_FILE}.tmp"
+			mv "${KNOWN_AP_FILE}.tmp" "$KNOWN_AP_FILE"
+			chmod 0600 "$KNOWN_AP_FILE"
+			continue
+		fi
+		[ "$carrier" = "1" ] && carrier="online"
 		awk -v p="$port" '$1 != p' "$tmp_ap" > "${tmp_ap}.known"
 		mv "${tmp_ap}.known" "$tmp_ap"
-		printf '%s\t%s\t%s\tconfigured-ap\n' "$port" "$carrier" "$count" >> "$tmp_ap"
-	done < "$KNOWN_AP_FILE" 2>/dev/null
+		if [ "$remembered_role" = "access_point" ]; then
+			printf '%s\t%s\t%s\tconfigured-ap\n' "$port" "$carrier" "$count" >> "$tmp_ap"
+		else
+			printf '%s\t%s\t%s\tconfigured-router\n' "$port" "$carrier" "$count" >> "$tmp_ap"
+		fi
+	done < "$known_snapshot" 2>/dev/null
+	rm -f "$known_snapshot"
+
+	probe_external_clients "$tmp_devices" "$tmp_types" "$tmp_ap"
 
 	lan_ports="$(state_value lan)"
 	[ -n "$lan_ports" ] || lan_ports="$(uci -q get network.br_lan.ports)"
@@ -187,8 +569,10 @@ scan_devices() {
 		elif [ "$count" -ge 2 ]; then
 			port_type="ap-or-switch"
 		fi
-		if awk -v p="$port" '$1 == p && $2 == "online" && ($4 == "configured-ap" || $4 == "name-match" || $4 == "inferred-ap") { found=1 } END { exit !found }' "$tmp_ap"; then
+		if awk -v p="$port" '$1 == p && $2 == "online" && ($4 == "configured-ap" || $4 == "name-match" || $4 == "inferred-ap" || $4 == "lldp-ap") { found=1 } END { exit !found }' "$tmp_ap"; then
 			port_type="access-point"
+		elif awk -v p="$port" '$1 == p && $2 == "online" && $4 == "configured-router" { found=1 } END { exit !found }' "$tmp_ap"; then
+			port_type="router"
 		fi
 		printf '%s\t%s\t%s\t%s\n' "$port" "$carrier" "$count" "$port_type" >> "$tmp_topology"
 	done
@@ -196,13 +580,14 @@ scan_devices() {
 	mv "$tmp_devices" "$DEVICE_FILE"
 	mv "$tmp_ap" "$AP_FILE"
 	mv "$tmp_types" "$TYPE_FILE"
+	mv "$tmp_identities" "$IDENTITY_FILE"
 	mv "$tmp_topology" "$TOPOLOGY_FILE"
 }
 
 show_status() {
 	printf 'LAN wired devices:\n'
 	if [ -s "$DEVICE_FILE" ]; then
-		printf 'MAC\tIP\tHOSTNAME\tPORT\tLAST_ACTIVITY_SECONDS\n'
+		printf 'MAC\tIP\tHOSTNAME\tPORT\tLAST_ACTIVITY_SECONDS\tPRESENCE_SOURCE\n'
 		cat "$DEVICE_FILE"
 	else
 		printf '(none detected)\n'
@@ -221,6 +606,13 @@ show_status() {
 	else
 		printf '(none detected)\n'
 	fi
+	printf '\nDevice identities:\n'
+	if [ -s "$IDENTITY_FILE" ]; then
+		printf 'MAC\tTYPE\tCONFIDENCE\tEVIDENCE\tNAME\n'
+		cat "$IDENTITY_FILE"
+	else
+		printf '(none detected)\n'
+	fi
 }
 
 if [ "$1" = "--status" ]; then
@@ -230,7 +622,9 @@ fi
 
 mkdir -p /tmp/proxyos /etc/proxyos
 touch "$KNOWN_AP_FILE"
+touch "$LEARNED_IDENTITY_FILE"
 chmod 0600 "$KNOWN_AP_FILE"
+chmod 0600 "$LEARNED_IDENTITY_FILE"
 while :; do
 	ensure_lan_ports
 	scan_devices

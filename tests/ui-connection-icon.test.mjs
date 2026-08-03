@@ -27,12 +27,19 @@ test("wired and downstream clients use the LAN icon", () => {
 
 test("clients behind an external AP or wireless router use the Wi-Fi icon", () => {
   assert.equal(isWifiDevice({ connection: "wifi_external_ap", type: "phone" }), true);
+  assert.equal(isWifiDevice({ connection: "wifi_external_ap", type: "computer" }), true);
   assert.equal(isWifiDevice({ connection: "wifi_external_router", type: "computer" }), true);
+  assert.equal(deviceIcon({ connection: "wifi_external_ap", type: "phone", name: "AP 无线终端" }), "smartphone");
 });
 
 test("AP and router infrastructure never use a computer icon", () => {
   assert.equal(deviceIcon({ connection: "external_ap_device", type: "external_client" }), "access-point");
   assert.equal(deviceIcon({ connection: "external_router_device", type: "external_client" }), "router");
+});
+
+test("unidentified external wireless clients use a neutral wireless icon", () => {
+  assert.equal(deviceIcon({ connection: "wifi_external_ap", type: "downstream_device", name: "无线设备" }), "wifi");
+  assert.equal(deviceIcon({ connection: "wifi_external_ap", type: "downstream_device", name: "OPPO-Reno5-Pro-5G" }), "smartphone");
 });
 
 test("all AP and downstream clients remain visible on the Wi-Fi management page", () => {
