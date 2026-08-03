@@ -302,14 +302,20 @@ devices() {
 				connection_type="wifi_external_ap"
 			elif awk -v port="$ap_port" '$3 == port && $2 == "router" { found=1 } END { exit !found }' /tmp/proxyos/lan-device-types 2>/dev/null; then
 				connection_type="wifi_external_router"
-			elif awk -v port="$ap_port" '$1 == port && ($4 == "name-match" || $4 == "configured-ap") { found=1 } END { exit !found }' /tmp/proxyos/ap-devices 2>/dev/null; then
+			elif awk -v port="$ap_port" '$1 == port && ($4 == "name-match" || $4 == "configured-ap" || $4 == "inferred-ap") { found=1 } END { exit !found }' /tmp/proxyos/ap-devices 2>/dev/null; then
 				connection_type="wifi_external_ap"
 			elif awk -v port="$ap_port" '$1 == port && $4 == "ap-or-switch" { found=1 } END { exit !found }' /tmp/proxyos/ap-devices 2>/dev/null; then
 				connection_type="lan_bridge_downstream"
 			else
 				continue
 			fi
-			[ "${hostname:-*}" = "*" ] && hostname="Unknown device"
+			if [ "${hostname:--}" = "-" ] || [ "${hostname:-*}" = "*" ]; then
+				case "$device_role" in
+					access_point) hostname="AP" ;;
+					router) hostname="下级路由器" ;;
+					*) hostname="Unknown device" ;;
+				esac
+			fi
 			online_state=false
 			case "$device_role" in
 				access_point|router)
@@ -324,7 +330,7 @@ devices() {
 			case "$(printf '%s' "$hostname" | tr 'A-Z' 'a-z')" in
 				*router*|*gateway*|*路由*) device_type="router" ;;
 				*external-ap*|*access-point*|*unifi*|*omada*|*wireless-ap*|*wifi-ap*) device_type="access_point" ;;
-				*iphone*|*android*|*phone*|*手机*) device_type="phone" ;;
+				*iphone*|*ipad*|*ios*|*android*|*pixel*|*phone*|*手机*) device_type="phone" ;;
 				*desktop*|*laptop*|*macbook*|*computer*|*电脑*) device_type="computer" ;;
 			esac
 			jq -nc --arg mac "$(printf '%s' "$mac" | tr 'a-f' 'A-F')" \
