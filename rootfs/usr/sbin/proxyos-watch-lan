@@ -141,16 +141,28 @@ scan_devices() {
 	while IFS="	" read -r mac device_type port evidence; do
 		[ "$device_type" = "access_point" ] || continue
 		printf '%s\tonline\t%s\tinferred-ap\n' "$port" "$(awk -v p="$port" '$4 == p { n++ } END { print n+0 }' "$tmp_devices")" >> "$tmp_ap"
+		# Remember the AP identity so a quiet AP management MAC ageing out does
+		# not make its active wireless clients look like direct LAN endpoints.
+		if ! awk -v p="$port" -v m="$mac" 'tolower($1) == tolower(p) && tolower($2) == tolower(m) { found=1 } END { exit !found }' "$KNOWN_AP_FILE" 2>/dev/null; then
+			awk -v p="$port" '$1 != p' "$KNOWN_AP_FILE" 2>/dev/null > "${KNOWN_AP_FILE}.tmp"
+			printf '%s\t%s\n' "$port" "$mac" >> "${KNOWN_AP_FILE}.tmp"
+			mv "${KNOWN_AP_FILE}.tmp" "$KNOWN_AP_FILE"
+			chmod 0600 "$KNOWN_AP_FILE"
+		fi
 	done < "$tmp_types"
 
 	while read -r port signature_mac rest; do
 		[ -n "$port" ] && [ -n "$signature_mac" ] || continue
 		signature_mac="$(printf '%s' "$signature_mac" | tr 'A-F' 'a-f')"
-		# A remembered AP role is valid only while that AP's own MAC is still
-		# learned on the port. Moving a PC onto the same socket must clear it.
-		awk -v p="$port" -v m="$signature_mac" '$1 == m && $4 == p { found=1 } END { exit !found }' "$tmp_devices" || continue
 		carrier="$(cat "/sys/class/net/$port/carrier" 2>/dev/null)"
-		[ "$carrier" = "1" ] || carrier="offline"
+		# Preserve the remembered role while the physical link stays up. The AP
+		# management MAC and sleeping clients may both be absent from the FDB.
+		if [ "$carrier" != "1" ]; then
+			awk -v p="$port" '$1 != p' "$KNOWN_AP_FILE" > "${KNOWN_AP_FILE}.tmp"
+			mv "${KNOWN_AP_FILE}.tmp" "$KNOWN_AP_FILE"
+			chmod 0600 "$KNOWN_AP_FILE"
+			continue
+		fi
 		[ "$carrier" = "1" ] && carrier="online"
 		count="$(awk -v p="$port" '$4 == p { n++ } END { print n+0 }' "$tmp_devices")"
 		awk -v p="$port" '$1 != p' "$tmp_ap" > "${tmp_ap}.known"
