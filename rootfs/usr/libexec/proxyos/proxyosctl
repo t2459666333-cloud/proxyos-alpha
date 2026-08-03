@@ -6,7 +6,7 @@ NODES_FILE="${STATE_DIR}/nodes.json"
 DEVICES_FILE="${STATE_DIR}/devices.json"
 PRESENCE_STATE_FILE="${STATE_DIR}/device-presence.json"
 PRESENCE_FILE="/tmp/proxyos/device-presence.json"
-EXTERNAL_CLIENT_ONLINE_GRACE="${PROXYOS_EXTERNAL_CLIENT_ONLINE_GRACE:-600}"
+EXTERNAL_CLIENT_ONLINE_GRACE="${PROXYOS_EXTERNAL_CLIENT_ONLINE_GRACE:-10}"
 SUBSCRIPTIONS_FILE="${STATE_DIR}/subscriptions.json"
 REMOTE_ACCESS_FILE="${STATE_DIR}/remote-access.json"
 TUNNEL_FILE="${STATE_DIR}/tunnel.json"
@@ -255,7 +255,7 @@ devices() {
 		jq -r '.l3_device // .device // "br-lan"' 2>/dev/null || printf 'br-lan')"
 	: > "$tmp_discovered"
 	case "$EXTERNAL_CLIENT_ONLINE_GRACE" in
-		*[!0-9]*|'') EXTERNAL_CLIENT_ONLINE_GRACE=600 ;;
+		*[!0-9]*|'') EXTERNAL_CLIENT_ONLINE_GRACE=10 ;;
 	esac
 
 	if [ -r /tmp/dhcp.leases ]; then
@@ -329,7 +329,7 @@ devices() {
 					case "${activity_age:-999999}" in *[!0-9]*|'') activity_age=999999 ;; esac
 					# Bridged APs do not expose association state. Phones become
 					# quiet while locked, so keep a recently learned FDB client
-					# online for ten minutes instead of dropping it after 15 seconds.
+					# online for a short configurable grace period.
 					[ "$activity_age" -le "$EXTERNAL_CLIENT_ONLINE_GRACE" ] && online_state=true
 					;;
 			esac

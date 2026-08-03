@@ -25,7 +25,7 @@ ensure_lan_ports() {
 	[ -d /sys/class/net/br-lan ] || return 0
 	# Keep quiet, locked mobile clients in the bridge FDB long enough for the
 	# controller's external-client presence grace period.
-	ip link set dev br-lan type bridge ageing_time 60000 2>/dev/null || true
+	ip link set dev br-lan type bridge ageing_time 1000 2>/dev/null || true
 
 	for port in $lan_ports; do
 		[ "$port" = "$wan" ] && continue

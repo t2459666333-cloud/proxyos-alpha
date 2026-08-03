@@ -14,9 +14,9 @@ test("offline profiles are hidden after seven days but policy records remain", (
 
 test("locked external AP clients remain online during the presence grace period", () => {
   assert.match(watcher, /bridge -s fdb show/);
-  assert.match(controller, /PROXYOS_EXTERNAL_CLIENT_ONLINE_GRACE:-600/);
+  assert.match(controller, /PROXYOS_EXTERNAL_CLIENT_ONLINE_GRACE:-10/);
   assert.match(controller, /activity_age" -le "\$EXTERNAL_CLIENT_ONLINE_GRACE"/);
-  assert.match(watcher, /ageing_time 60000/);
+  assert.match(watcher, /ageing_time 1000/);
   assert.match(watcher, /PROXYOS_LAN_SCAN_INTERVAL:-2/);
 });
 
