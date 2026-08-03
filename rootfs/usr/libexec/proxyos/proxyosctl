@@ -349,6 +349,23 @@ devices() {
 		done < /tmp/proxyos/lan-devices
 	fi
 
+	# A confirmed AP remains physically connected even when its management MAC
+	# is quiet and ages out of the bridge FDB. Synthesize its infrastructure
+	# record from the remembered AP identity and the port carrier, keeping AP
+	# status independent from the ten-second client activity rule.
+	if [ -r /etc/proxyos/ap-ports ]; then
+		while read -r ap_port ap_mac rest; do
+			[ -n "${ap_port:-}" ] && [ -n "${ap_mac:-}" ] || continue
+			ap_online=false
+			[ "$(cat "/sys/class/net/${ap_port}/carrier" 2>/dev/null || true)" = "1" ] && ap_online=true
+			jq -nc \
+				--arg mac "$(printf '%s' "$ap_mac" | tr 'a-f' 'A-F')" \
+				--arg port "$ap_port" --argjson online "$ap_online" \
+				'{mac:$mac,name:"AP",connection:"external_ap_device",type:"access_point",band:"AP 本体",ap_port:$port,physical_port:$port,detection:"remembered-ap",online:$online}' \
+				>> "$tmp_discovered"
+		done < /etc/proxyos/ap-ports
+	fi
+
 	if [ -r /tmp/proxyos/lan-device-types ]; then
 		while IFS="	" read -r mac device_type physical_port evidence; do
 			[ -n "${mac:-}" ] && [ -n "${device_type:-}" ] || continue

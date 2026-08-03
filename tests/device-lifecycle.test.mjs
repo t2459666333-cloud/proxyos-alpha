@@ -26,6 +26,8 @@ test("remembered AP ports do not become direct LAN when the AP MAC is quiet", ()
   assert.match(watcher, /Preserve the remembered role while the physical link stays up/);
   assert.match(controller, /configured-ap[\s\S]*connection_type="wifi_external_ap"/);
   assert.match(controller, /device_type="\$\{device_role:-external_client\}"/);
+  assert.match(controller, /keeping AP[\s\S]*status independent from the ten-second client activity rule/);
+  assert.match(controller, /detection:"remembered-ap",online:\$online/);
 });
 
 test("the dashboard refreshes presence within five seconds", () => {
