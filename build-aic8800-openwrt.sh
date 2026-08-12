@@ -19,10 +19,18 @@ echo "${SDK_SHA256}  ${WORK_DIR}/${SDK_ARCHIVE}" | sha256sum --check -
 tar --use-compress-program=unzstd -xf "${WORK_DIR}/${SDK_ARCHIVE}" \
   -C "${SDK_DIR}" --strip-components=1
 
+cd "${SDK_DIR}"
+./scripts/feeds update base
+./scripts/feeds install mac80211
+
 package_dir="${SDK_DIR}/package/aic8800"
 package_url="https://raw.githubusercontent.com/coolsnowwolf/lede/${LEDE_COMMIT}/package/kernel/aic8800"
 mkdir -p "${package_dir}/patches"
 curl --fail --location "${package_url}/Makefile" --output "${package_dir}/Makefile"
+# The source is pinned by its full Git commit. Reproducible archive hashes can
+# vary when OpenWrt's archive generator changes, so do not reuse LEDE's cache
+# hash in a different SDK release.
+sed -i 's/^PKG_MIRROR_HASH:=.*/PKG_MIRROR_HASH:=skip/' "${package_dir}/Makefile"
 for patch_name in \
   010-fix-fall-through.patch \
   020-wireless-6.16.patch \
@@ -34,7 +42,6 @@ for patch_name in \
     --output "${package_dir}/patches/${patch_name}"
 done
 
-cd "${SDK_DIR}"
 cat >> .config <<'EOF'
 CONFIG_PACKAGE_aic8800-usb-firmware=m
 CONFIG_PACKAGE_kmod-aic8800-usb=m
