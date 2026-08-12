@@ -43,10 +43,19 @@ for patch_name in \
 done
 
 cat >> .config <<'EOF'
+# The SDK defaults CONFIG_ALL/CONFIG_ALL_KMODS to enabled. Disable those
+# selectors so this hot-test build cannot pull in unrelated AIC Bluetooth,
+# PCIe, SDIO or every hostapd/mac80211 variant.
+# CONFIG_ALL is not set
+# CONFIG_ALL_NONSHARED is not set
+# CONFIG_ALL_KMODS is not set
 CONFIG_PACKAGE_aic8800-usb-firmware=m
 CONFIG_PACKAGE_kmod-aic8800-usb=m
 EOF
 make defconfig
+grep -q '^# CONFIG_PACKAGE_kmod-aic8800-btusb is not set$' .config
+grep -q '^# CONFIG_PACKAGE_kmod-aic8800-pcie is not set$' .config
+grep -q '^# CONFIG_PACKAGE_kmod-aic8800-sdio is not set$' .config
 make package/aic8800/download V=s
 make package/aic8800/compile V=s -j"$(nproc)"
 
