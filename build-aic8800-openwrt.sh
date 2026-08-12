@@ -48,7 +48,7 @@ CONFIG_PACKAGE_kmod-aic8800-usb=m
 EOF
 make defconfig
 make package/aic8800/download V=s
-make package/aic8800/compile V=s -j2
+make package/aic8800/compile V=s -j"$(nproc)"
 
 find "${SDK_DIR}/bin" -type f \
   \( -name 'aic8800-usb-firmware-*.apk' -o -name 'kmod-aic8800-usb-*.apk' \) \

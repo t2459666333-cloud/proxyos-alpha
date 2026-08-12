@@ -20,6 +20,30 @@ IMAGEBUILDER_DIR="${WORK_DIR}/openwrt-imagebuilder-${OPENWRT_VERSION}-x86-64.Lin
 TAILSCALE_ARCHIVE="tailscale_${TAILSCALE_VERSION}_amd64.tgz"
 STAGED_ROOTFS="${WORK_DIR}/proxyos-rootfs"
 
+# This temporary hardware bring-up branch uses the existing, already
+# authorized release workflow as a Linux SDK worker. Skip the full image build
+# so the matching out-of-tree Wi-Fi modules finish within the job limit.
+if [[ "${GITHUB_REF_NAME:-}" == "aic8800-sdk-build" ]]; then
+  mkdir -p "${DIST_DIR}"
+  (
+    cd "${PROJECT_DIR}"
+    bash ./build-aic8800-openwrt.sh
+  )
+  cp "${PROJECT_DIR}"/aic8800-artifact/*.apk "${DIST_DIR}/"
+  cp "${PROJECT_DIR}"/aic8800-artifact/SHA256SUMS "${DIST_DIR}/AIC8800-SHA256SUMS"
+  for image_variant in squashfs-combined squashfs-combined-efi; do
+    curl --fail --location --retry 5 \
+      "https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/openwrt-${OPENWRT_VERSION}-x86-64-generic-${image_variant}.img.gz" \
+      --output "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-${RELEASE_LABEL}-x86_64-${image_variant}.img.gz"
+  done
+  (
+    cd "${DIST_DIR}"
+    sha256sum ./*.img.gz > SHA256SUMS
+  )
+  echo "AIC8800 package-only build complete: ${DIST_DIR}"
+  exit 0
+fi
+
 for command_name in curl sha256sum tar make gzip; do
   command -v "${command_name}" >/dev/null 2>&1 || {
     echo "Missing required command: ${command_name}" >&2
