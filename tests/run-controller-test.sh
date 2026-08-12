@@ -43,6 +43,8 @@ if [[ -n "${PROXYOS_SINGBOX:-}" ]]; then
   export PROXYOS_SINGBOX
 elif [[ -x "${PROJECT_DIR}/.tools-cache/sing-box" ]]; then
   export PROXYOS_SINGBOX="${PROJECT_DIR}/.tools-cache/sing-box"
+else
+  export PROXYOS_SKIP_CONFIG_CHECK=1
 fi
 
 PROXYOS_STATE_DIR="${STATE_DIR}" \
@@ -87,6 +89,19 @@ for list_command in devices nodes ports subscriptions; do
     "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" "${list_command}" |
     jq -e '.items | type == "array"' >/dev/null
 done
+
+mkdir -p "${STATE_DIR}/ip-type-api"
+cat > "${STATE_DIR}/ip-type-api/203.0.113.10" <<'EOF'
+{"risk":{"is_datacenter":true}}
+EOF
+PROXYOS_STATE_DIR="${STATE_DIR}" \
+PROXYOS_IP_TYPE_FIXED_EXIT_IP="203.0.113.10" \
+PROXYOS_IP_TYPE_PRIMARY_URL="file://${STATE_DIR}/ip-type-api" \
+  "${PROJECT_DIR}/rootfs/usr/libexec/proxyos/proxyosctl" node-ip-type-test \
+  '{"id":"hk01"}' |
+  jq -e '.ok == true and .ip_type == "datacenter" and .exit_ip == "203.0.113.10"' >/dev/null
+jq -e 'any(.[]; .id == "hk01" and .ip_type == "datacenter" and .ip_type_status == "complete")' \
+  "${STATE_DIR}/nodes.json" >/dev/null
 
 test_node="$(
   PROXYOS_STATE_DIR="${STATE_DIR}" \

@@ -54,6 +54,6 @@ test("duplicate node tests fail fast and the UI disables every test action", () 
   assert.match(controller, /mutation_lock_owned=true/);
   assert.match(controller, /\[ "\$\{mutation_lock_owned:-false\}" != true \] \|\| rm -rf "\$mutation_lock"/);
   assert.match(webApp, /nodeTestInProgress: false/);
-  assert.match(webApp, /if \(state\.nodeTestInProgress\)/);
+  assert.match(webApp, /if \(state\.nodeTestInProgress \|\| state\.nodeIpTypeTestInProgress\)/);
   assert.match(webApp, /\$\$\("\.test-node"\)\.forEach\(\(item\) => \{ item\.disabled = true; \}\)/);
 });

@@ -42,6 +42,7 @@ const state = {
   refreshTimer: null,
   loading: false,
   nodeTestInProgress: false,
+  nodeIpTypeTestInProgress: false,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -190,7 +191,7 @@ async function ubusCall(object, method, payload = {}, session = state.session, t
 
 const api = (method, payload = {}) =>
   ubusCall("proxyos", method, payload, state.session,
-    ["subscription_update", "device_bind", "devices_assign_node", "node_test"].includes(method) ? 90000 : 30000);
+    ["subscription_update", "device_bind", "devices_assign_node", "node_test", "node_ip_type_test"].includes(method) ? 90000 : 30000);
 const unwrapItems = (value) => (Array.isArray(value?.items) ? value.items : Array.isArray(value) ? value : []);
 
 async function login(username, password) {
@@ -467,6 +468,19 @@ function stabilityMarkup(node) {
   const label = value >= 90 ? "优秀" : value >= 70 ? "稳定" : value >= 50 ? "波动" : "不稳定";
   return `<span class="quality-badge ${tone}"><strong>${Math.round(value)}</strong><small>${label}</small></span>`;
 }
+
+function nodeIpTypeMarkup(node) {
+  const status = node?.ip_type_status || "untested";
+  if (status === "complete" && ["datacenter", "residential"].includes(node?.ip_type)) {
+    const label = node.ip_type === "datacenter" ? "机房" : "住宅";
+    const provider = node?.ip_type_provider ? ` · ${node.ip_type_provider}` : "";
+    return `<span class="status-badge online" title="${escapeHtml(`出口 ${node.exit_ip || "未知"}${provider}`)}">${label}</span>`;
+  }
+  if (status === "error") {
+    return `<span class="status-badge offline" title="${escapeHtml(node?.ip_type_error || "检测失败，请重试")}">检测失败</span>`;
+  }
+  return `<span class="status-badge offline" title="请点击右侧“检测类型”">未检测</span>`;
+}
 function qualityText(value, suffix = "") {
   if (value == null || value === "") return "尚未完整测速";
   const numeric = Number(value);
@@ -650,10 +664,11 @@ function renderNodes() {
       <td>${downloadSpeedMarkup(node)}</td>
       <td>${packetLossMarkup(node)}</td>
       <td>${stabilityMarkup(node)}</td>
+      <td>${nodeIpTypeMarkup(node)}</td>
       <td><span class="status-badge ${node.status === "error" ? "blocked" : "online"}">${node.status === "error" ? "异常" : "可用"}</span></td>
-      <td><div class="node-actions"><button class="text-action edit-node" data-id="${escapeHtml(node.id)}">编辑</button><button class="text-action test-node" data-id="${escapeHtml(node.id)}">测速</button><button class="text-action assign-node" data-id="${escapeHtml(node.id)}">分配设备</button><button class="more-button delete-node" data-id="${escapeHtml(node.id)}">⋮</button></div></td>
+      <td><div class="node-actions"><button class="text-action edit-node" data-id="${escapeHtml(node.id)}">编辑</button><button class="text-action test-node" data-id="${escapeHtml(node.id)}">测速</button><button class="text-action test-node-ip-type" data-id="${escapeHtml(node.id)}">检测类型</button><button class="text-action assign-node" data-id="${escapeHtml(node.id)}">分配设备</button><button class="more-button delete-node" data-id="${escapeHtml(node.id)}">⋮</button></div></td>
     </tr>`;
-  }).join("") : `<tr><td colspan="10"><div class="empty-state">节点库为空，请添加手动节点或订阅。</div></td></tr>`;
+  }).join("") : `<tr><td colspan="11"><div class="empty-state">节点库为空，请添加手动节点或订阅。</div></td></tr>`;
   $("#node-count").textContent = nodes.length
     ? `共 ${nodes.length} 条 · 当前 ${pageStart + 1}–${Math.min(pageStart + state.nodePageSize, nodes.length)}`
     : "共 0 条";
@@ -664,6 +679,7 @@ function renderNodes() {
   hydrateIcons();
   $$(".delete-node").forEach((button) => button.addEventListener("click", () => deleteNode(button.dataset.id)));
   $$(".test-node").forEach((button) => button.addEventListener("click", () => testNode(button)));
+  $$(".test-node-ip-type").forEach((button) => button.addEventListener("click", () => testNodeIpType(button)));
   $$(".assign-node").forEach((button) => button.addEventListener("click", () => assignNode(button.dataset.id)));
   $$(".edit-node").forEach((button) => button.addEventListener("click", () => openNodeModal(button.dataset.id)));
 }
@@ -1173,12 +1189,13 @@ function syncNodeProtocolFields() {
   $("#raw-json-field").classList.toggle("is-hidden", !raw);
 }
 async function testNode(button) {
-  if (state.nodeTestInProgress) {
-    showToast("已有节点正在测速，请等待当前测速完成", true);
+  if (state.nodeTestInProgress || state.nodeIpTypeTestInProgress) {
+    showToast("已有节点测试正在进行，请等待完成", true);
     return;
   }
   state.nodeTestInProgress = true;
   $$(".test-node").forEach((item) => { item.disabled = true; });
+  $$(".test-node-ip-type").forEach((item) => { item.disabled = true; });
   const old = button.textContent;
   button.textContent = "测试中";
   try {
@@ -1193,6 +1210,32 @@ async function testNode(button) {
   } catch (error) { showToast(error.message, true); }
   finally {
     state.nodeTestInProgress = false;
+    $$(".test-node").forEach((item) => { item.disabled = false; });
+    $$(".test-node-ip-type").forEach((item) => { item.disabled = false; });
+    if (document.contains(button)) button.textContent = old;
+  }
+}
+async function testNodeIpType(button) {
+  if (state.nodeIpTypeTestInProgress || state.nodeTestInProgress) {
+    showToast("已有节点测试正在进行，请等待完成", true);
+    return;
+  }
+  state.nodeIpTypeTestInProgress = true;
+  $$(".test-node-ip-type").forEach((item) => { item.disabled = true; });
+  $$(".test-node").forEach((item) => { item.disabled = true; });
+  const old = button.textContent;
+  button.textContent = "检测中";
+  try {
+    const result = await api("node_ip_type_test", { id: button.dataset.id });
+    const label = result.ip_type === "datacenter" ? "机房" : "住宅";
+    showToast(`类型检测完成：${label}`);
+    await loadAll({ quiet: true });
+  } catch (error) {
+    await loadAll({ quiet: true });
+    showToast(error.message, true);
+  } finally {
+    state.nodeIpTypeTestInProgress = false;
+    $$(".test-node-ip-type").forEach((item) => { item.disabled = false; });
     $$(".test-node").forEach((item) => { item.disabled = false; });
     if (document.contains(button)) button.textContent = old;
   }

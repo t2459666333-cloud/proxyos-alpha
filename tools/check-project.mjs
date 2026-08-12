@@ -12,6 +12,7 @@ const required = [
   "rootfs/etc/hotplug.d/iface/95-proxyos-remote-access",
   "rootfs/etc/proxyos/remote-access.json",
   "rootfs/etc/proxyos/tunnel.json",
+  "rootfs/etc/proxyos/ip-type-cache.json",
   "rootfs/etc/uci-defaults/99-proxyos",
   "rootfs/usr/libexec/proxyos/proxyosctl",
   "rootfs/usr/libexec/proxyos/proxyos-dhcp-event",
@@ -34,6 +35,7 @@ for (const relative of [
   "rootfs/etc/proxyos/nodes.json",
   "rootfs/etc/proxyos/devices.json",
   "rootfs/etc/proxyos/subscriptions.json",
+  "rootfs/etc/proxyos/ip-type-cache.json",
   "rootfs/etc/proxyos/config-template.json",
   "rootfs/usr/share/rpcd/acl.d/proxyos.json",
 ]) {
@@ -219,6 +221,26 @@ for (const requiredQualityProbe of [
   if (!controller.includes(requiredQualityProbe)) {
     throw new Error(`Controller is missing full node quality probe behavior: ${requiredQualityProbe}`);
   }
+}
+for (const requiredIpTypeBehavior of [
+  "node-ip-type-test",
+  "api.ipquery.io",
+  "pinip.net/api?format=json&ip=",
+  "probe_node_exit_ip",
+  "ip_type_status",
+  "IP_TYPE_CACHE_TTL",
+]) {
+  if (!controller.includes(requiredIpTypeBehavior)) {
+    throw new Error(`Controller is missing manual IP type behavior: ${requiredIpTypeBehavior}`);
+  }
+}
+for (const ipTypeMarkup of ["nodeIpTypeMarkup", "机房", "住宅", "检测类型", "node_ip_type_test"]) {
+  if (!appScript.includes(ipTypeMarkup)) {
+    throw new Error(`ProxyOS UI is missing manual node IP type markup: ${ipTypeMarkup}`);
+  }
+}
+if (appScript.includes("干净度") || appScript.includes("cleanliness")) {
+  throw new Error("Node UI must not render a cleanliness column or label");
 }
 if (!appStyles.includes(".egress-ip { display: inline;") || !appStyles.includes("font: inherit;")) {
   throw new Error("Exit IP must inherit the local-IP typography");

@@ -30,6 +30,7 @@
           "node_update",
           "node_delete",
           "node_test",
+          "node_ip_type_test",
           "health_check",
           "device_bind",
           "devices_assign_node",

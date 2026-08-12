@@ -14,6 +14,7 @@ case "$1" in
   "node_update": {"id":"", "name":"", "outbound_json":""},
   "node_delete": {"id":""},
   "node_test": {"id":""},
+  "node_ip_type_test": {"id":""},
   "health_check": {},
   "egress_check": {"node_id":"", "device_mac":""},
   "device_bind": {"mac":"", "ip":"", "name":"", "connection":"", "type":"", "policy":"", "node_id":"", "backup_node_id":"", "failure_mode":"", "auto_source":""},
@@ -77,6 +78,9 @@ EOF
 				;;
 			node_test)
 				exec "$CTL" node-test "$input"
+				;;
+			node_ip_type_test)
+				exec "$CTL" node-ip-type-test "$input"
 				;;
 			egress_check)
 				exec "$CTL" egress-check "$input"

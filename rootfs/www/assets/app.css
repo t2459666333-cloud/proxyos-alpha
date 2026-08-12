@@ -406,7 +406,7 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--blue); }
 .node-search { width: 235px; }
 .node-search input { padding-left: 40px; padding-right: 12px; }
 .node-search .icon { left: 14px; right: auto; }
-.node-table { min-width: 1420px; }
+.node-table { min-width: 1540px; }
 .node-table td { height: 70px; }
 .node-name strong { font-size: 13px; }
 .source-label { color: #4b5870; }
@@ -428,7 +428,7 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--blue); }
 .quality-badge.unknown { color: #8a96a9; background: #f2f4f8; font-size: 10px; }
 .node-quality-note { min-height: 43px; padding: 9px 20px; display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); color: #748198; background: #fbfcff; font-size: 10px; }
 .node-quality-note .icon { width: 15px; height: 15px; flex: 0 0 auto; color: var(--blue); }
-.node-actions { display: flex; align-items: center; gap: 10px; min-width: 235px; }
+.node-actions { display: flex; align-items: center; gap: 10px; min-width: 300px; }
 .text-action { border: 0; background: transparent; color: var(--blue); font-size: 12px; padding: 5px 3px; }
 .text-action.danger { color: var(--red); }
 .pagination { display: flex; align-items: center; gap: 8px; }

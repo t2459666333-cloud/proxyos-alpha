@@ -3,6 +3,7 @@ set -eu
 
 STATE_DIR="${PROXYOS_STATE_DIR:-/etc/proxyos}"
 NODES_FILE="${STATE_DIR}/nodes.json"
+IP_TYPE_CACHE_FILE="${STATE_DIR}/ip-type-cache.json"
 DEVICES_FILE="${STATE_DIR}/devices.json"
 PRESENCE_STATE_FILE="${STATE_DIR}/device-presence.json"
 PRESENCE_FILE="/tmp/proxyos/device-presence.json"
@@ -20,6 +21,9 @@ PORT_ROLLBACK_FLAG="/tmp/proxyos-port-rollback.pending"
 PORT_ROLLBACK_CONFIG="/tmp/proxyos-network.rollback"
 VERSION_FILE="${STATE_DIR}/version"
 TAILSCALE_SOCKET="/var/run/tailscale/tailscaled.sock"
+IP_TYPE_PRIMARY_URL="${PROXYOS_IP_TYPE_PRIMARY_URL:-https://api.ipquery.io}"
+IP_TYPE_FALLBACK_URL="${PROXYOS_IP_TYPE_FALLBACK_URL:-https://pinip.net/api?format=json&ip=}"
+IP_TYPE_CACHE_TTL="${PROXYOS_IP_TYPE_CACHE_TTL:-2592000}"
 
 proxyos_version() {
 	cat "$VERSION_FILE" 2>/dev/null || printf '1.0.0'
@@ -117,6 +121,7 @@ sync_block_firewall() {
 ensure_state() {
 	mkdir -p "$STATE_DIR" /tmp/proxyos
 	[ -s "$NODES_FILE" ] || printf '[]\n' > "$NODES_FILE"
+	[ -s "$IP_TYPE_CACHE_FILE" ] || printf '{"version":1,"entries":{}}\n' > "$IP_TYPE_CACHE_FILE"
 	[ -s "$DEVICES_FILE" ] || printf '[]\n' > "$DEVICES_FILE"
 	if [ ! -s "$PRESENCE_FILE" ]; then
 		if [ -s "$PRESENCE_STATE_FILE" ]; then cp "$PRESENCE_STATE_FILE" "$PRESENCE_FILE"; else printf '[]\n' > "$PRESENCE_FILE"; fi
@@ -584,7 +589,13 @@ nodes() {
 			packet_loss_percent:(.packet_loss_percent // null),
 			stability_score:(.stability_score // null),
 			status:(.status // "unknown"),
-			last_test:(.last_test // 0)
+			last_test:(.last_test // 0),
+			exit_ip:(.exit_ip // ""),
+			ip_type:(.ip_type // "unknown"),
+			ip_type_status:(.ip_type_status // "untested"),
+			ip_type_provider:(.ip_type_provider // ""),
+			ip_type_checked_at:(.ip_type_checked_at // 0),
+			ip_type_error:(.ip_type_error // "")
 		})
 	}' "$NODES_FILE"
 }
@@ -654,7 +665,11 @@ node_add() {
 		--arg id "$node_id" \
 		--arg name "$name" \
 		--argjson outbound "$canonical" \
-		'{id:$id,name:$name,source_type:"manual",source_id:"",enabled:true,outbound:$outbound}')"
+		'{
+			id:$id,name:$name,source_type:"manual",source_id:"",enabled:true,outbound:$outbound,
+			ip_type:"unknown",ip_type_status:"untested",exit_ip:"",
+			ip_type_provider:"",ip_type_checked_at:0,ip_type_error:""
+		}')"
 
 	nodes_rollback="${NODES_FILE}.rollback.$$"
 	cp "$NODES_FILE" "$nodes_rollback"
@@ -690,15 +705,25 @@ node_update() {
 	tmp_file="${NODES_FILE}.tmp.$$"
 	jq --arg id "$node_id" --arg name "$name" --argjson outbound "$canonical" '
 		map(if .id == $id then
-			.name=$name |
-			.outbound=$outbound |
-			.status="unknown" |
-			.latency_ms=null |
-			.latency_domestic_ms=null |
-			.latency_foreign_ms=null |
-			.download_mbps=null |
-			.packet_loss_percent=null |
-			.stability_score=null
+			if .outbound == $outbound then
+				.name=$name
+			else
+				.name=$name |
+				.outbound=$outbound |
+				.status="unknown" |
+				.latency_ms=null |
+				.latency_domestic_ms=null |
+				.latency_foreign_ms=null |
+				.download_mbps=null |
+				.packet_loss_percent=null |
+				.stability_score=null |
+				.ip_type="unknown" |
+				.ip_type_status="untested" |
+				.exit_ip="" |
+				.ip_type_provider="" |
+				.ip_type_checked_at=0 |
+				.ip_type_error=""
+			end
 		else . end)
 	' "$NODES_FILE" > "$tmp_file"
 	mv "$tmp_file" "$NODES_FILE"
@@ -801,6 +826,147 @@ fetch_public_ip() {
 		fi
 	done
 	return 1
+}
+
+normalize_ipquery_type() {
+	response="$1"
+	checked_at="$2"
+	printf '%s' "$response" | jq -ce --argjson checked_at "$checked_at" \
+		--argjson ttl "$IP_TYPE_CACHE_TTL" '
+		(.risk // {}) as $risk |
+		select(($risk.is_datacenter | type) == "boolean") |
+		{
+			ip_type:(if $risk.is_datacenter then "datacenter" else "residential" end),
+			provider:"ipquery.io",
+			checked_at:$checked_at,
+			expires_at:($checked_at + $ttl)
+		}
+	'
+}
+
+normalize_pinip_type() {
+	response="$1"
+	checked_at="$2"
+	printf '%s' "$response" | jq -ce --argjson checked_at "$checked_at" \
+		--argjson ttl "$IP_TYPE_CACHE_TTL" '
+		select(.success == true) |
+		select((.is_hosting | type) == "boolean") |
+		{
+			ip_type:(if .is_hosting then "datacenter" else "residential" end),
+			provider:"pinip.net",
+			checked_at:$checked_at,
+			expires_at:($checked_at + $ttl)
+		}
+	'
+}
+
+lookup_ip_type() {
+	lookup_ip="$1"
+	lookup_now="$(date +%s)"
+	cached_type="$(
+		jq -ce --arg ip "$lookup_ip" --argjson now "$lookup_now" \
+			'.entries[$ip] | select((.expires_at // 0) > $now)' \
+			"$IP_TYPE_CACHE_FILE" 2>/dev/null || true
+	)"
+	if [ -n "$cached_type" ]; then
+		printf '%s\n' "$cached_type"
+		return 0
+	fi
+
+	primary_response="$(
+		curl --fail --silent --show-error --location \
+			--connect-timeout 5 --max-time 12 \
+			"${IP_TYPE_PRIMARY_URL%/}/${lookup_ip}" 2>/dev/null || true
+	)"
+	type_result="$(normalize_ipquery_type "$primary_response" "$lookup_now" 2>/dev/null || true)"
+	if [ -z "$type_result" ]; then
+		fallback_response="$(
+			curl --fail --silent --show-error --location \
+				--user-agent "ProxyOS/$(proxyos_version) IP type test" \
+				--connect-timeout 5 --max-time 12 \
+				"${IP_TYPE_FALLBACK_URL}${lookup_ip}" 2>/dev/null || true
+		)"
+		type_result="$(normalize_pinip_type "$fallback_response" "$lookup_now" 2>/dev/null || true)"
+	fi
+	[ -n "$type_result" ] || return 1
+
+	cache_tmp="${IP_TYPE_CACHE_FILE}.tmp.$$"
+	jq --arg ip "$lookup_ip" --argjson type_result "$type_result" '
+		.version=1 | .entries=(.entries // {}) | .entries[$ip]=$type_result
+	' "$IP_TYPE_CACHE_FILE" > "$cache_tmp" && mv "$cache_tmp" "$IP_TYPE_CACHE_FILE"
+	printf '%s\n' "$type_result"
+}
+
+probe_node_exit_ip() {
+	probe_outbound="$1"
+	fixed_exit_ip="${PROXYOS_IP_TYPE_FIXED_EXIT_IP:-}"
+	if [ -n "$fixed_exit_ip" ]; then
+		printf '%s\n' "$fixed_exit_ip"
+		return 0
+	fi
+	test_port=$((40000 + ($$ % 20000)))
+	test_config="/tmp/proxyos-ip-type-probe.$$.json"
+	test_log="/tmp/proxyos-ip-type-probe.$$.log"
+	jq -n --argjson outbound "$probe_outbound" --argjson port "$test_port" '{
+		log:{level:"error"},
+		inbounds:[{type:"mixed",tag:"test-in",listen:"127.0.0.1",listen_port:$port}],
+		outbounds:[
+			($outbound + {tag:"test-node",domain_resolver:"dns-direct"}),
+			{type:"direct",tag:"direct"}
+		],
+		dns:{servers:[{type:"local",tag:"dns-direct"}],final:"dns-direct",strategy:"ipv4_only"},
+		route:{default_domain_resolver:"dns-direct",rules:[],final:"test-node"}
+	}' > "$test_config"
+	if ! "$SINGBOX" check -c "$test_config" >"$test_log" 2>&1; then
+		cleanup_node_probe
+		return 1
+	fi
+	"$SINGBOX" run -c "$test_config" >"$test_log" 2>&1 &
+	test_pid="$!"
+	sleep 1
+	public_result="$(fetch_public_ip "socks5h://127.0.0.1:${test_port}" || true)"
+	cleanup_node_probe
+	public_ip="${public_result%%|*}"
+	printf '%s' "$public_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+	printf '%s\n' "$public_ip"
+}
+
+node_ip_type_test() {
+	input="$1"
+	node_id="$(printf '%s' "$input" | jq -r '.id // empty')"
+	[ -n "$node_id" ] || json_error "Node id is required"
+	outbound="$(jq -ce --arg id "$node_id" '.[] | select(.id == $id) | .outbound' "$NODES_FILE" 2>/dev/null || true)"
+	[ -n "$outbound" ] || json_error "Node not found"
+	exit_ip="$(probe_node_exit_ip "$outbound" 2>/dev/null || true)"
+	if [ -z "$exit_ip" ]; then
+		tmp_file="${NODES_FILE}.tmp.$$"
+		jq --arg id "$node_id" 'map(if .id == $id then
+			.ip_type="unknown" | .ip_type_status="error" | .exit_ip="" |
+			.ip_type_provider="" | .ip_type_checked_at=0 | .ip_type_error="无法取得节点出口 IP"
+		else . end)' "$NODES_FILE" > "$tmp_file"
+		mv "$tmp_file" "$NODES_FILE"
+		json_error "无法通过该节点取得出口 IP，请先确认节点可用"
+	fi
+	type_result="$(lookup_ip_type "$exit_ip" 2>/dev/null || true)"
+	if [ -z "$type_result" ]; then
+		tmp_file="${NODES_FILE}.tmp.$$"
+		jq --arg id "$node_id" --arg ip "$exit_ip" 'map(if .id == $id then
+			.ip_type="unknown" | .ip_type_status="error" | .exit_ip=$ip |
+			.ip_type_provider="" | .ip_type_checked_at=0 | .ip_type_error="IP 类型服务暂时不可用"
+		else . end)' "$NODES_FILE" > "$tmp_file"
+		mv "$tmp_file" "$NODES_FILE"
+		json_error "IP 类型服务暂时不可用，请稍后重试"
+	fi
+	tmp_file="${NODES_FILE}.tmp.$$"
+	jq --arg id "$node_id" --arg ip "$exit_ip" --argjson type_result "$type_result" '
+		map(if .id == $id then
+			.ip_type=$type_result.ip_type | .ip_type_status="complete" | .exit_ip=$ip |
+			.ip_type_provider=$type_result.provider | .ip_type_checked_at=$type_result.checked_at |
+			.ip_type_error=""
+		else . end)
+	' "$NODES_FILE" > "$tmp_file"
+	mv "$tmp_file" "$NODES_FILE"
+	json_ok "\"id\":$(printf '%s' "$node_id" | jq -Rs .),\"exit_ip\":$(printf '%s' "$exit_ip" | jq -Rs .),\"ip_type\":$(printf '%s' "$type_result" | jq '.ip_type'),\"provider\":$(printf '%s' "$type_result" | jq '.provider')"
 }
 
 probe_proxy_latency() {
@@ -2475,6 +2641,7 @@ subscription_update() {
 		($parsed[0].nodes // [] |
 			map(. as $fresh |
 				($old_nodes | map(select(.id == $fresh.id)) | .[0]) as $previous |
+				($previous != null and $previous.outbound == $fresh.outbound) as $unchanged |
 				$fresh + {
 					status:($previous.status // "unknown"),
 					latency_ms:($previous.latency_ms // null),
@@ -2483,7 +2650,13 @@ subscription_update() {
 					download_mbps:($previous.download_mbps // null),
 					packet_loss_percent:($previous.packet_loss_percent // null),
 					stability_score:($previous.stability_score // null),
-					last_test:($previous.last_test // 0)
+					last_test:($previous.last_test // 0),
+					exit_ip:(if $unchanged then ($previous.exit_ip // "") else "" end),
+					ip_type:(if $unchanged then ($previous.ip_type // "unknown") else "unknown" end),
+					ip_type_status:(if $unchanged then ($previous.ip_type_status // "untested") else "untested" end),
+					ip_type_provider:(if $unchanged then ($previous.ip_type_provider // "") else "" end),
+					ip_type_checked_at:(if $unchanged then ($previous.ip_type_checked_at // 0) else 0 end),
+					ip_type_error:(if $unchanged then ($previous.ip_type_error // "") else "" end)
 				}
 			)
 		) as $fresh_nodes |
@@ -2568,7 +2741,7 @@ policy_apply() {
 
 backup_create() {
 	archive="/tmp/proxyos-backup.$$.tar.gz"
-	files="etc/proxyos/nodes.json etc/proxyos/devices.json etc/proxyos/device-identities etc/proxyos/subscriptions.json etc/proxyos/remote-access.json etc/proxyos/config-template.json etc/config/proxyos etc/config/network etc/config/dhcp etc/config/wireless etc/config/firewall"
+	files="etc/proxyos/nodes.json etc/proxyos/ip-type-cache.json etc/proxyos/devices.json etc/proxyos/device-identities etc/proxyos/subscriptions.json etc/proxyos/remote-access.json etc/proxyos/config-template.json etc/config/proxyos etc/config/network etc/config/dhcp etc/config/wireless etc/config/firewall"
 	(
 		cd /
 		existing=""
@@ -2769,7 +2942,7 @@ require_commands
 ensure_state
 
 case "$command_name" in
-	node-add|node-update|node-delete|node-test|device-bind|devices-assign-node|wifi-toggle|wifi-apply|wifi-disconnect|ports-apply|ports-confirm|subscription-add|subscription-save|subscription-update|subscription-delete|policy-apply|remote-access-apply|remote-access-rotate|tunnel-connect|tunnel-logout|backup-restore|password-set|system-reboot|apply)
+	node-add|node-update|node-delete|node-test|node-ip-type-test|device-bind|devices-assign-node|wifi-toggle|wifi-apply|wifi-disconnect|ports-apply|ports-confirm|subscription-add|subscription-save|subscription-update|subscription-delete|policy-apply|remote-access-apply|remote-access-rotate|tunnel-connect|tunnel-logout|backup-restore|password-set|system-reboot|apply)
 		acquire_mutation_lock
 		assert_state_writable
 		;;
@@ -2785,6 +2958,7 @@ case "$command_name" in
 	node-update) node_update "$input" ;;
 	node-delete) node_delete "$input" ;;
 	node-test) node_test "$input" ;;
+	node-ip-type-test) node_ip_type_test "$input" ;;
 	health-check) health_check ;;
 	egress-check) egress_check "$input" ;;
 	device-bind) device_bind "$input" ;;
