@@ -169,3 +169,11 @@ cp "${BIOS_SOURCE}" "${DIST_DIR}/ProxyOS-${OPENWRT_VERSION}-${RELEASE_LABEL}-x86
 )
 
 echo "Build complete: ${DIST_DIR}"
+
+echo "[AIC8800] Building USB Wi-Fi packages against the same OpenWrt release"
+(
+  cd "${PROJECT_DIR}"
+  bash ./build-aic8800-openwrt.sh
+)
+cp "${PROJECT_DIR}"/aic8800-artifact/*.apk "${DIST_DIR}/"
+cp "${PROJECT_DIR}"/aic8800-artifact/SHA256SUMS "${DIST_DIR}/AIC8800-SHA256SUMS"
